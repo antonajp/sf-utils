@@ -409,6 +409,103 @@ class TestDescribeObjectRetryBehavior:
         assert mock_sleep.call_count == 2
 
 
+class TestSObjectExceptionHandling:
+    """Tests for exception handling across all sobject functions."""
+
+    def test_get_record_raises_auth_error_on_403(self):
+        """Should raise SalesforceAuthError on 403 Forbidden."""
+        mock_client = Mock()
+        mock_sobjects = Mock()
+        mock_sobjects.query.return_value = (
+            [{"message": "Insufficient privileges", "errorCode": "INSUFFICIENT_ACCESS"}],
+            403
+        )
+        mock_client.sobjects.return_value = mock_sobjects
+
+        with pytest.raises(SalesforceAuthError) as exc_info:
+            get_record("Account", "001", client=mock_client)
+
+        assert exc_info.value.status_code == 403
+
+    def test_create_record_raises_api_error_on_400(self):
+        """Should raise SalesforceAPIError on 400 client errors."""
+        mock_client = Mock()
+        mock_sobjects = Mock()
+        mock_sobjects.insert.return_value = (
+            [{"message": "Required field missing", "errorCode": "REQUIRED_FIELD_MISSING"}],
+            400
+        )
+        mock_client.sobjects.return_value = mock_sobjects
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            create_record("Account", {}, client=mock_client)
+
+        assert exc_info.value.status_code == 400
+
+    def test_update_record_raises_api_error_on_404(self):
+        """Should raise SalesforceAPIError on 404 not found."""
+        mock_client = Mock()
+        mock_sobjects = Mock()
+        mock_sobjects.update.return_value = (
+            [{"message": "Record not found", "errorCode": "NOT_FOUND"}],
+            404
+        )
+        mock_client.sobjects.return_value = mock_sobjects
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            update_record("Account", "001", {"Name": "Test"}, client=mock_client)
+
+        assert exc_info.value.status_code == 404
+
+    def test_delete_record_raises_api_error_on_404(self):
+        """Should raise SalesforceAPIError on 404 not found."""
+        mock_client = Mock()
+        mock_sobjects = Mock()
+        mock_sobjects.delete.return_value = (
+            [{"message": "Record not found", "errorCode": "NOT_FOUND"}],
+            404
+        )
+        mock_client.sobjects.return_value = mock_sobjects
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            delete_record("Account", "001", client=mock_client)
+
+        assert exc_info.value.status_code == 404
+
+    @patch('time.sleep')
+    def test_describe_object_raises_api_error_on_500(self, mock_sleep):
+        """Should retry and raise SalesforceAPIError on persistent 500 errors."""
+        mock_client = Mock()
+        mock_sobjects = Mock()
+        mock_sobjects.describe.return_value = (
+            [{"message": "Internal server error"}],
+            500
+        )
+        mock_client.sobjects.return_value = mock_sobjects
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            describe_object("Account", client=mock_client)
+
+        assert exc_info.value.status_code == 500
+        # Should retry (DEFAULT_RETRY_CONFIG has max_retries=3, so 4 total calls)
+        assert mock_sobjects.describe.call_count == 4
+
+    def test_upsert_record_raises_auth_error_on_401(self):
+        """Should raise SalesforceAuthError on 401 unauthorized."""
+        mock_client = Mock()
+        mock_sobjects = Mock()
+        mock_sobjects.upsert.return_value = (
+            [{"message": "Session expired", "errorCode": "INVALID_SESSION_ID"}],
+            401
+        )
+        mock_client.sobjects.return_value = mock_sobjects
+
+        with pytest.raises(SalesforceAuthError) as exc_info:
+            upsert_record("Account", "External_Id__c", "ext-123", {"Name": "Test"}, client=mock_client)
+
+        assert exc_info.value.status_code == 401
+
+
 class TestSObjectNoneResponses:
     """Tests for handling None responses."""
 
