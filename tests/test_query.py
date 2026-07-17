@@ -87,7 +87,7 @@ class TestQueryRetryBehavior:
         assert mock_client.query.call_count == 6
 
     def test_query_auth_error_not_retried(self):
-        """Should not retry authentication errors."""
+        """Should not retry authentication errors (401)."""
         mock_client = Mock()
         mock_client.query.return_value = (
             {"message": "Unauthorized"},
@@ -99,6 +99,50 @@ class TestQueryRetryBehavior:
 
         # Should only be called once (no retries)
         assert mock_client.query.call_count == 1
+
+    def test_query_raises_auth_error_on_403(self):
+        """Should raise SalesforceAuthError on 403 Forbidden."""
+        mock_client = Mock()
+        mock_client.query.return_value = (
+            [{"message": "Insufficient privileges", "errorCode": "INSUFFICIENT_ACCESS"}],
+            403
+        )
+
+        with pytest.raises(SalesforceAuthError) as exc_info:
+            query("SELECT Id FROM Account", client=mock_client)
+
+        assert exc_info.value.status_code == 403
+        assert mock_client.query.call_count == 1  # No retry
+
+    def test_query_raises_api_error_on_400(self):
+        """Should raise SalesforceAPIError on 400 client errors."""
+        mock_client = Mock()
+        mock_client.query.return_value = (
+            [{"message": "Invalid SOQL", "errorCode": "MALFORMED_QUERY"}],
+            400
+        )
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            query("INVALID SOQL", client=mock_client)
+
+        assert exc_info.value.status_code == 400
+        assert mock_client.query.call_count == 1  # No retry on 4xx
+
+    @patch('time.sleep')
+    def test_query_raises_api_error_on_500(self, mock_sleep):
+        """Should retry and eventually raise SalesforceAPIError on persistent 500 errors."""
+        mock_client = Mock()
+        mock_client.query.return_value = (
+            [{"message": "Internal server error"}],
+            500
+        )
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            query("SELECT Id FROM Account", client=mock_client)
+
+        assert exc_info.value.status_code == 500
+        # Should retry (DEFAULT_RETRY_CONFIG has max_retries=3, so 4 total calls)
+        assert mock_client.query.call_count == 4
 
     def test_query_default_retry_config(self):
         """Should use DEFAULT_RETRY_CONFIG by default."""
@@ -212,6 +256,59 @@ class TestQueryAllRetryBehavior:
         # Should call 3 times (initial + 2 retries)
         assert mock_client.query.call_count == 3
         assert mock_sleep.call_count == 2
+
+
+class TestQueryAllExceptionHandling:
+    """Tests for query_all() exception handling."""
+
+    def test_query_all_raises_auth_error_on_403(self):
+        """Should raise SalesforceAuthError on 403 during pagination."""
+        mock_client = Mock()
+        mock_client.query.return_value = (
+            [{"message": "Insufficient privileges", "errorCode": "INSUFFICIENT_ACCESS"}],
+            403
+        )
+
+        with pytest.raises(SalesforceAuthError) as exc_info:
+            query_all("SELECT Id FROM Account", client=mock_client)
+
+        assert exc_info.value.status_code == 403
+        assert mock_client.query.call_count == 1  # No retry
+
+    def test_query_all_raises_api_error_on_400(self):
+        """Should raise SalesforceAPIError on 400 client errors."""
+        mock_client = Mock()
+        mock_client.query.return_value = (
+            [{"message": "Invalid SOQL", "errorCode": "MALFORMED_QUERY"}],
+            400
+        )
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            query_all("INVALID SOQL", client=mock_client)
+
+        assert exc_info.value.status_code == 400
+        assert mock_client.query.call_count == 1  # No retry on 4xx
+
+    def test_query_all_pagination_raises_exception(self):
+        """Should raise exception when pagination fails with error."""
+        mock_client = Mock()
+        # First page succeeds
+        mock_client.query.return_value = (
+            {
+                "records": [{"Id": "001"}],
+                "done": False,
+                "nextRecordsUrl": "/query/next1"
+            },
+            200
+        )
+        # Pagination fails with auth error
+        mock_client.query_more.return_value = (
+            [{"message": "Session expired"}],
+            401
+        )
+
+        with pytest.raises(SalesforceAuthError):
+            query_all("SELECT Id FROM Account", client=mock_client)
 
 
 class TestQueryNoneResponse:
