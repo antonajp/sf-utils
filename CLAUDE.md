@@ -100,6 +100,8 @@ sf-sprint-runner         # Batch: orchestrates multiple tickets with CI/merge
 ### Tech Stack
 - **Language**: Python 3.9+
 - **Salesforce**: SalesforcePy 2.2+
+- **Database**: PostgreSQL (Docker container, psycopg2)
+- **Export**: openpyxl (Excel), csv (stdlib)
 - **Config**: python-dotenv
 - **Testing**: pytest, pytest-cov
 - **CI/CD**: GitHub Actions (planned)
@@ -118,16 +120,48 @@ tests/
 
 ### Environment Variables
 ```
+# Salesforce
 SF_USERNAME=user@example.com
 SF_PASSWORD=password
 SF_CLIENT_ID=connected-app-client-id
 SF_CLIENT_SECRET=connected-app-secret
 SF_SANDBOX=false          # true for sandbox orgs
 SF_API_VERSION=v61.0      # optional
+
+# PostgreSQL (Docker container)
+PG_HOST=localhost
+PG_PORT=5432
+PG_DATABASE=sf_utils
+PG_USER=postgres
+PG_PASSWORD=your-password
 ```
+
+## Data Flow Pattern
+
+```
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│   Salesforce    │      │   PostgreSQL    │      │  Excel / CSV    │
+│   (REST API)    │ ──→  │   (Docker)      │ ──→  │   (Export)      │
+└─────────────────┘      └─────────────────┘      └─────────────────┘
+     query()              sync/cache               analyze/export
+     query_all()          local storage            aggregate reports
+```
+
+**Phase 1: Sync** - Query Salesforce data and cache locally in PostgreSQL
+- Implementations create tables as needed (no strict schema)
+- Raw psycopg2 for database access
+- Each clone has its own Docker PostgreSQL instance
+
+**Phase 2: Analyze** - Query local PostgreSQL and produce reports
+- Aggregate data, compute metrics
+- Export to Excel (.xlsx) or CSV
+- No live Salesforce connection needed
 
 ### Key Design Decisions
 - All functions accept optional `client` parameter; creates one from env if not provided
 - SalesforcePy returns `(body, status)` tuples; utilities handle this consistently
 - Sandbox vs production determined by `SF_SANDBOX` env var (uses test.salesforce.com)
 - Pagination handled automatically in `query_all()`
+- PostgreSQL is loosely coupled - each clone has its own Docker container
+- Database schema is flexible - implementations create tables as needed
+- Use parameterized queries only (prevent SQL injection)
