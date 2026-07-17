@@ -62,7 +62,9 @@ def get_record(
 
         body, status = response if isinstance(response, tuple) else (response, 200)
 
-        raise_for_status(body, status)
+        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+        # Rate limit detection works via error code parsing (REQUEST_LIMIT_EXCEEDED) instead.
+        raise_for_status(body, status, headers=None)
 
         return body
 
@@ -122,7 +124,8 @@ def create_record(
 
         body, status = response if isinstance(response, tuple) else (response, 201)
 
-        raise_for_status(body, status)
+        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+        raise_for_status(body, status, headers=None)
 
         record_id = body.get("id")
         logger.debug("Created %s record: %s", sobject_type, record_id)
@@ -187,7 +190,8 @@ def update_record(
 
         body, status = response if isinstance(response, tuple) else (response, 204)
 
-        raise_for_status(body, status)
+        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+        raise_for_status(body, status, headers=None)
 
         logger.debug("Updated %s record: %s", sobject_type, record_id)
         return True
@@ -261,7 +265,8 @@ def upsert_record(
 
         body, status = response if isinstance(response, tuple) else (response, 200)
 
-        raise_for_status(body, status)
+        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+        raise_for_status(body, status, headers=None)
 
         created = status == 201
         result = {
@@ -328,7 +333,8 @@ def delete_record(
 
         body, status = response if isinstance(response, tuple) else (response, 204)
 
-        raise_for_status(body, status)
+        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+        raise_for_status(body, status, headers=None)
 
         logger.debug("Deleted %s record: %s", sobject_type, record_id)
         return True
@@ -387,7 +393,8 @@ def describe_object(
 
         body, status = response if isinstance(response, tuple) else (response, 200)
 
-        raise_for_status(body, status)
+        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+        raise_for_status(body, status, headers=None)
 
         return body
 
