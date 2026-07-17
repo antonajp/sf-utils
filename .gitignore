@@ -1,3 +1,7 @@
+# Claude Code agents and commands (managed in base-claude-flow repo)
+.claude/agents/
+.claude/commands/
+
 # Environment and secrets - NEVER commit these
 .env
 .env.*
