@@ -8,6 +8,24 @@ Python utility functions for Salesforce operations with local PostgreSQL caching
 - **Local Caching** - Sync Salesforce data to PostgreSQL for offline analysis
 - **Export** - Generate Excel (.xlsx) and CSV reports from cached data
 
+## Data Privacy
+
+**All data stays on your local machine.**
+
+| Component | Location | Cloud Exposure |
+|-----------|----------|----------------|
+| PostgreSQL | Docker container on developer's machine | None |
+| Excel/CSV exports | Local filesystem | None |
+| Credentials | `.env` file (gitignored) | None |
+
+This architecture is designed for organizations where Salesforce data must remain within the corporate firewall:
+
+- **PostgreSQL** runs in a local Docker instance on the developer's computer — no cloud database services involved
+- **Excel and CSV files** are generated locally and only leave the machine through deliberate user action (email, Slack, file sharing, etc.)
+- **No data is transmitted to external cloud services** unless you explicitly choose to do so
+
+The only external connection is to Salesforce itself (to query/sync data), which is already within your organization's Salesforce tenant
+
 ## Installation
 
 ```bash
@@ -150,15 +168,21 @@ fields = [f["name"] for f in metadata["fields"]]
 ## Data Flow Pattern
 
 ```
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│   Salesforce    │      │   PostgreSQL    │      │  Excel / CSV    │
-│   (REST API)    │ ──→  │   (Docker)      │ ──→  │   (Export)      │
-└─────────────────┘      └─────────────────┘      └─────────────────┘
+                        ┌──────────────────────────────────────────────┐
+                        │           YOUR LOCAL MACHINE                 │
+┌─────────────────┐     │  ┌─────────────────┐      ┌───────────────┐  │
+│   Salesforce    │     │  │   PostgreSQL    │      │  Excel / CSV  │  │
+│   (Your Org)    │ ──────→│   (Docker)      │ ──→  │   (Local)     │  │
+└─────────────────┘     │  └─────────────────┘      └───────────────┘  │
+                        │                                              │
+                        │  No data leaves this boundary automatically  │
+                        └──────────────────────────────────────────────┘
 ```
 
 1. **Sync**: Query Salesforce and cache data locally in PostgreSQL
 2. **Analyze**: Query local database, compute aggregates
-3. **Export**: Generate Excel or CSV reports
+3. **Export**: Generate Excel or CSV reports locally
+4. **Distribute** (optional, user-initiated): Share via corporate email, Slack, etc.
 
 ## Development
 
