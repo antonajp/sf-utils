@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 from SalesforcePy.sfdc import Client
 
 from sf_utils.client import get_client
+from sf_utils.exceptions import SalesforceAPIError
+from sf_utils.retry import raise_for_status
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +30,9 @@ def get_record(
         Record dictionary.
 
     Raises:
-        Exception: If retrieval fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If retrieval fails.
     """
     if client is None:
         client = get_client()
@@ -44,12 +48,14 @@ def get_record(
     response = sobjects.query(**params) if params else sobjects.query()
 
     if response is None:
-        raise Exception(f"Failed to retrieve {sobject_type} record {record_id}")
+        raise SalesforceAPIError(
+            message=f"Failed to retrieve {sobject_type} record {record_id}",
+            status_code=500
+        )
 
     body, status = response if isinstance(response, tuple) else (response, 200)
 
-    if status >= 400:
-        raise Exception(f"Get record failed with status {status}: {body}")
+    raise_for_status(body, status)
 
     return body
 
@@ -70,7 +76,9 @@ def create_record(
         The ID of the created record.
 
     Raises:
-        Exception: If creation fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If creation fails.
     """
     if client is None:
         client = get_client()
@@ -81,12 +89,14 @@ def create_record(
     response = sobjects.insert(data)
 
     if response is None:
-        raise Exception(f"Failed to create {sobject_type} record")
+        raise SalesforceAPIError(
+            message=f"Failed to create {sobject_type} record",
+            status_code=500
+        )
 
     body, status = response if isinstance(response, tuple) else (response, 201)
 
-    if status >= 400:
-        raise Exception(f"Create record failed with status {status}: {body}")
+    raise_for_status(body, status)
 
     record_id = body.get("id")
     logger.debug("Created %s record: %s", sobject_type, record_id)
@@ -112,7 +122,9 @@ def update_record(
         True if update succeeded.
 
     Raises:
-        Exception: If update fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If update fails.
     """
     if client is None:
         client = get_client()
@@ -123,12 +135,14 @@ def update_record(
     response = sobjects.update(data)
 
     if response is None:
-        raise Exception(f"Failed to update {sobject_type} record {record_id}")
+        raise SalesforceAPIError(
+            message=f"Failed to update {sobject_type} record {record_id}",
+            status_code=500
+        )
 
     body, status = response if isinstance(response, tuple) else (response, 204)
 
-    if status >= 400:
-        raise Exception(f"Update record failed with status {status}: {body}")
+    raise_for_status(body, status)
 
     logger.debug("Updated %s record: %s", sobject_type, record_id)
     return True
@@ -154,7 +168,9 @@ def upsert_record(
         Dict with 'id' and 'created' (bool) keys.
 
     Raises:
-        Exception: If upsert fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If upsert fails.
     """
     if client is None:
         client = get_client()
@@ -174,12 +190,14 @@ def upsert_record(
     response = sobjects.upsert(data)
 
     if response is None:
-        raise Exception(f"Failed to upsert {sobject_type} record")
+        raise SalesforceAPIError(
+            message=f"Failed to upsert {sobject_type} record",
+            status_code=500
+        )
 
     body, status = response if isinstance(response, tuple) else (response, 200)
 
-    if status >= 400:
-        raise Exception(f"Upsert record failed with status {status}: {body}")
+    raise_for_status(body, status)
 
     created = status == 201
     result = {
@@ -207,7 +225,9 @@ def delete_record(
         True if deletion succeeded.
 
     Raises:
-        Exception: If deletion fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If deletion fails.
     """
     if client is None:
         client = get_client()
@@ -218,12 +238,14 @@ def delete_record(
     response = sobjects.delete()
 
     if response is None:
-        raise Exception(f"Failed to delete {sobject_type} record {record_id}")
+        raise SalesforceAPIError(
+            message=f"Failed to delete {sobject_type} record {record_id}",
+            status_code=500
+        )
 
     body, status = response if isinstance(response, tuple) else (response, 204)
 
-    if status >= 400:
-        raise Exception(f"Delete record failed with status {status}: {body}")
+    raise_for_status(body, status)
 
     logger.debug("Deleted %s record: %s", sobject_type, record_id)
     return True
@@ -243,7 +265,9 @@ def describe_object(
         Object describe result with fields, relationships, etc.
 
     Raises:
-        Exception: If describe fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If describe fails.
     """
     if client is None:
         client = get_client()
@@ -254,11 +278,13 @@ def describe_object(
     response = sobjects.describe()
 
     if response is None:
-        raise Exception(f"Failed to describe {sobject_type}")
+        raise SalesforceAPIError(
+            message=f"Failed to describe {sobject_type}",
+            status_code=500
+        )
 
     body, status = response if isinstance(response, tuple) else (response, 200)
 
-    if status >= 400:
-        raise Exception(f"Describe failed with status {status}: {body}")
+    raise_for_status(body, status)
 
     return body

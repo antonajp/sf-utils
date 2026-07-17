@@ -10,8 +10,23 @@ from sf_utils.sobjects import (
     delete_record,
     describe_object,
 )
+from sf_utils.exceptions import (
+    SalesforceError,
+    SalesforceRateLimitError,
+    SalesforceAuthError,
+    SalesforceAPIError,
+)
+from sf_utils.retry import (
+    RetryConfig,
+    APIUsageInfo,
+    with_retry,
+    raise_for_status,
+    DEFAULT_RETRY_CONFIG,
+    BATCH_RETRY_CONFIG,
+    NO_RETRY_CONFIG,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "get_client",
@@ -24,4 +39,17 @@ __all__ = [
     "upsert_record",
     "delete_record",
     "describe_object",
+    # Exceptions
+    "SalesforceError",
+    "SalesforceRateLimitError",
+    "SalesforceAuthError",
+    "SalesforceAPIError",
+    # Retry logic
+    "RetryConfig",
+    "APIUsageInfo",
+    "with_retry",
+    "raise_for_status",
+    "DEFAULT_RETRY_CONFIG",
+    "BATCH_RETRY_CONFIG",
+    "NO_RETRY_CONFIG",
 ]

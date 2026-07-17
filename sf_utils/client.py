@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 import SalesforcePy as sfdc
 from SalesforcePy.sfdc import Client
 
+from sf_utils.exceptions import SalesforceAuthError
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +112,9 @@ def get_client(
 
         if response is None or not response:
             logger.error("Salesforce login failed - no response")
-            raise Exception("Salesforce login failed")
+            raise SalesforceAuthError(
+                message="Salesforce login failed - check credentials"
+            )
 
         logger.debug("Salesforce login successful")
 
