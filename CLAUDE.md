@@ -35,22 +35,59 @@ Every code change passes 4 review lenses:
 
 ## Orchestration Commands
 
-| Command | Purpose | Usage |
-|---------|---------|-------|
-| `/sf-create-ticket` | Create Jira ticket with parallel agent analysis | `/sf-create-ticket Add bulk query support` |
-| `/sf-develop-ticket` | Implement a ticket with review cycles | `/sf-develop-ticket DEV-123` |
-| `/sf-plan-project` | Generate user story WBS for a feature | `/sf-plan-project Add Bulk API 2.0 support` |
-| `/sf-sprint-runner` | Batch execute tickets with CI/merge | `/sf-sprint-runner DEV-123 DEV-124` |
+Commands are managed in the `base-claude-flow` repo and loaded into `.claude/commands/`.
+
+### `/sf-create-ticket <description>`
+Create a Jira ticket with parallel agent analysis. Agents research codebase, define requirements, API design, security considerations, and test strategy.
+
+```bash
+/sf-create-ticket Add support for Salesforce Bulk API 2.0
+/sf-create-ticket --light Fix typo in docstring    # Skip agent research
+/sf-create-ticket --deep Complex architectural change
+```
+
+**Flags**: `--light` (no agents), `--standard`/`--deep` (research depth), `--nosec`, `--noapi`
+
+### `/sf-develop-ticket <ticket-id>`
+Implement a single Jira ticket with iterative review cycles. Creates branch, implements with parallel agents, runs code/API/security reviews, iterates until approved, commits.
+
+```bash
+/sf-develop-ticket DEV-123
+/sf-develop-ticket DEV-123 --nosec    # Skip security review
+```
+
+**Phases**: Git setup → Retrieve ticket → Parallel implementation → Review/audit → Iterate → Test → Commit
+
+### `/sf-plan-project <description>`
+Generate a comprehensive user story WBS with sprint planning. Interactive Q&A gathers context, then agents produce epics, stories, estimates, and dependencies.
+
+```bash
+/sf-plan-project Add async support for all query operations
+```
+
+**Output**: `docs/sf-utils-user-stories.md`
+
+### `/sf-sprint-runner <tickets|--cycle status>`
+Batch execute multiple tickets end-to-end: implement, push, PR, CI, merge, repeat. Handles dependencies, sends email reports.
+
+```bash
+/sf-sprint-runner DEV-123 DEV-124 DEV-125
+/sf-sprint-runner --cycle "In Progress"    # All tickets in status
+/sf-sprint-runner --dry-run DEV-123        # Preview only
+/sf-sprint-runner --resume                 # Continue after failure
+```
+
+**Flags**: `--dry-run`, `--resume [path]`, `--cycle <status>`
 
 ### Command Hierarchy
 ```
-sf-plan-project          # High-level: generates user stories → docs/
+sf-plan-project          # Planning: generates user stories → docs/
     ↓
 sf-create-ticket         # Atomic: creates single Jira ticket
     ↓
-sf-develop-ticket        # Atomic: implements single ticket
+sf-develop-ticket        # Atomic: implements single ticket (used by sprint-runner)
     ↓
-sf-sprint-runner         # High-level: orchestrates multiple tickets end-to-end
+sf-sprint-runner         # Batch: orchestrates multiple tickets with CI/merge
 ```
 
 ### Rules
