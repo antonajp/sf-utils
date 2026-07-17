@@ -93,7 +93,6 @@
       "Bash(chmod 777 *)",
       "Bash(mkfs *)",
       "Bash(dd if=*)",
-      "Bash(:(){ :|:& };:)",
       "Bash(shutdown *)",
       "Bash(reboot *)",
       "Bash(init *)",
