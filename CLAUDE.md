@@ -33,6 +33,26 @@ Every code change passes 4 review lenses:
 3. **Security** (security-auditor)
 4. **Testing** (qa-quality-assurance)
 
+## Orchestration Commands
+
+| Command | Purpose | Usage |
+|---------|---------|-------|
+| `/sf-create-ticket` | Create Jira ticket with parallel agent analysis | `/sf-create-ticket Add bulk query support` |
+| `/sf-develop-ticket` | Implement a ticket with review cycles | `/sf-develop-ticket DEV-123` |
+| `/sf-plan-project` | Generate user story WBS for a feature | `/sf-plan-project Add Bulk API 2.0 support` |
+| `/sf-sprint-runner` | Batch execute tickets with CI/merge | `/sf-sprint-runner DEV-123 DEV-124` |
+
+### Command Hierarchy
+```
+sf-plan-project          # High-level: generates user stories → docs/
+    ↓
+sf-create-ticket         # Atomic: creates single Jira ticket
+    ↓
+sf-develop-ticket        # Atomic: implements single ticket
+    ↓
+sf-sprint-runner         # High-level: orchestrates multiple tickets end-to-end
+```
+
 ### Rules
 - **Modular Design**: No Python file exceeds 600 lines.
 - **Environment Safety**: Never hardcode secrets. Use `.env` files (gitignored) or environment variables.
