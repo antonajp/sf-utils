@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 from SalesforcePy.sfdc import Client
 
 from sf_utils.client import get_client
+from sf_utils.exceptions import SalesforceAPIError
+from sf_utils.retry import raise_for_status
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,8 @@ def query(
 ) -> List[Dict[str, Any]]:
     """Execute a SOQL query and return the first batch of results.
 
+    Automatically raises typed exceptions for API errors.
+
     Args:
         soql: SOQL query string.
         client: Authenticated Salesforce client. Creates one if not provided.
@@ -24,7 +28,9 @@ def query(
         List of record dictionaries.
 
     Raises:
-        Exception: If query fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If query fails with other errors.
     """
     if client is None:
         client = get_client()
@@ -35,14 +41,16 @@ def query(
 
     if response is None:
         logger.error("Query returned None")
-        raise Exception("Query failed - no response")
+        raise SalesforceAPIError(
+            message="Query failed - no response from Salesforce",
+            status_code=500
+        )
 
     # SalesforcePy returns tuple (response_body, status_code)
     body, status = response if isinstance(response, tuple) else (response, 200)
 
-    if status >= 400:
-        logger.error("Query failed with status %d: %s", status, body)
-        raise Exception(f"Query failed with status {status}: {body}")
+    # Raises typed exceptions for error status codes
+    raise_for_status(body, status)
 
     records = body.get("records", [])
     logger.debug("Query returned %d records", len(records))
@@ -56,6 +64,8 @@ def query_all(
 ) -> List[Dict[str, Any]]:
     """Execute a SOQL query and return ALL results, handling pagination.
 
+    Automatically raises typed exceptions for API errors.
+
     Args:
         soql: SOQL query string.
         client: Authenticated Salesforce client. Creates one if not provided.
@@ -64,7 +74,9 @@ def query_all(
         List of all record dictionaries across all pages.
 
     Raises:
-        Exception: If query fails.
+        SalesforceAuthError: If authentication fails.
+        SalesforceRateLimitError: If rate limit is exceeded.
+        SalesforceAPIError: If query fails with other errors.
     """
     if client is None:
         client = get_client()
@@ -77,13 +89,15 @@ def query_all(
 
     if response is None:
         logger.error("Query returned None")
-        raise Exception("Query failed - no response")
+        raise SalesforceAPIError(
+            message="Query failed - no response from Salesforce",
+            status_code=500
+        )
 
     body, status = response if isinstance(response, tuple) else (response, 200)
 
-    if status >= 400:
-        logger.error("Query failed with status %d: %s", status, body)
-        raise Exception(f"Query failed with status {status}: {body}")
+    # Raises typed exceptions for error status codes
+    raise_for_status(body, status)
 
     records = body.get("records", [])
     all_records.extend(records)
