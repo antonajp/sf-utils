@@ -68,7 +68,9 @@ def query(
         body, status = response if isinstance(response, tuple) else (response, 200)
 
         # Raises typed exceptions for error status codes
-        raise_for_status(body, status)
+        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+        # Rate limit detection works via error code parsing (REQUEST_LIMIT_EXCEEDED) instead.
+        raise_for_status(body, status, headers=None)
 
         records = body.get("records", [])
         logger.debug("Query returned %d records", len(records))
@@ -160,7 +162,8 @@ def query_all(
             body, status = response if isinstance(response, tuple) else (response, 200)
 
             # Raise exceptions for error status codes to trigger retry
-            raise_for_status(body, status)
+            # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
+            raise_for_status(body, status, headers=None)
 
             records = body.get("records", [])
             all_records.extend(records)

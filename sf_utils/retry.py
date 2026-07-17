@@ -238,6 +238,10 @@ def raise_for_status(body: Any, status: int, headers: Optional[Dict[str, str]] =
         body: Response body from Salesforce API.
         status: HTTP status code.
         headers: Response headers (optional, used for Retry-After and API usage).
+            NOTE: SalesforcePy 2.2.1 does NOT expose HTTP response headers.
+            This parameter exists for API compatibility and future extensibility,
+            but will typically be None when called from query.py or sobjects.py.
+            Rate limit detection relies on error code parsing instead.
 
     Raises:
         SalesforceAuthError: For 401/403 status codes.
