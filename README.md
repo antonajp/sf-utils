@@ -73,17 +73,29 @@ PG_HOST=localhost
 PG_PORT=5432
 PG_DATABASE=sf_utils
 PG_USER=postgres
-PG_PASSWORD=your-password
+PG_PASSWORD=postgres
 ```
 
-**Start PostgreSQL container:**
+**Setup PostgreSQL (recommended):**
+
+```bash
+./scripts/setup-db.sh
+```
+
+This script handles all edge cases automatically:
+- Stops and removes existing `sf-utils-postgres` containers
+- Pulls the latest PostgreSQL 16 image
+- Creates a new container with health checks
+- Waits for the database to be ready
+
+**Or start manually:**
 
 ```bash
 docker run -d \
   --name sf-utils-postgres \
-  -e POSTGRES_PASSWORD=your-password \
+  -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=sf_utils \
-  -p 5432:5432 \
+  -p 127.0.0.1:5432:5432 \
   postgres:16
 ```
 

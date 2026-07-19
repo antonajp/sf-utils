@@ -39,6 +39,9 @@ ENV/
 .coverage
 htmlcov/
 
+# Generated documentation
+docs/
+
 # OS
 .DS_Store
 Thumbs.db
