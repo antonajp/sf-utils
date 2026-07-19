@@ -78,15 +78,21 @@ PG_PASSWORD=postgres
 
 **Setup PostgreSQL (recommended):**
 
+Linux / macOS:
 ```bash
 ./scripts/setup-db.sh
 ```
 
-This script handles all edge cases automatically:
-- Stops and removes existing `sf-utils-postgres` containers
-- Pulls the latest PostgreSQL 16 image
-- Creates a new container with health checks
-- Waits for the database to be ready
+Windows PowerShell:
+```powershell
+.\scripts\setup-db.ps1
+```
+
+These scripts handle all edge cases automatically:
+- Stop and remove existing `sf-utils-postgres` containers
+- Pull the latest PostgreSQL 16 image
+- Create a new container bound to localhost only
+- Wait for the database to be ready
 
 **Or start manually:**
 
