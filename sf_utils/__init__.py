@@ -25,6 +25,7 @@ from sf_utils.retry import (
     BATCH_RETRY_CONFIG,
     NO_RETRY_CONFIG,
 )
+from sf_utils.sync import load_soql
 
 __version__ = "0.2.0"
 
@@ -52,4 +53,6 @@ __all__ = [
     "DEFAULT_RETRY_CONFIG",
     "BATCH_RETRY_CONFIG",
     "NO_RETRY_CONFIG",
+    # Sync utilities
+    "load_soql",
 ]
