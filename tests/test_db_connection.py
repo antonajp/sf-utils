@@ -6,14 +6,16 @@ Tests cover:
 - Connection error handling and validation
 - Password redaction in logs and repr
 - Input validation for security
+- execute_query function with parameterized queries
 """
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 import pytest
+from psycopg2 import DatabaseError
 
-from sf_utils.db import PostgresConfig, get_connection
+from sf_utils.db import PostgresConfig, execute_query, get_connection
 
 
 class TestPostgresConfig:
@@ -553,3 +555,444 @@ class TestEdgeCases:
         call_kwargs = mock_connect.call_args.kwargs
         assert call_kwargs["port"] == 5432
         assert call_kwargs["sslmode"] == "prefer"
+
+
+class TestExecuteQuery:
+    """Tests for execute_query parameterized query function."""
+
+    def test_select_query_returns_rows(self):
+        """Should execute SELECT query and return rows when fetch=True."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            (1, "Account A", "active"),
+            (2, "Account B", "inactive"),
+        ]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col1}, {col2}, {col3} FROM {table} WHERE {status_col} = %s",
+            identifiers={
+                "col1": "id",
+                "col2": "name",
+                "col3": "status",
+                "table": "accounts",
+                "status_col": "status",
+            },
+            params=("active",),
+            fetch=True,
+        )
+
+        assert len(rows) == 2
+        assert rows[0] == (1, "Account A", "active")
+        assert rows[1] == (2, "Account B", "inactive")
+        mock_cursor.execute.assert_called_once()
+        mock_cursor.fetchall.assert_called_once()
+
+    def test_insert_query_returns_row_count(self):
+        """Should execute INSERT query and return affected row count when fetch=False."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 1
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        count = execute_query(
+            mock_conn,
+            "INSERT INTO {table} ({col1}, {col2}) VALUES (%s, %s)",
+            identifiers={"table": "accounts", "col1": "name", "col2": "status"},
+            params=("New Account", "active"),
+            fetch=False,
+        )
+
+        assert count == 1
+        mock_cursor.execute.assert_called_once()
+        assert not mock_cursor.fetchall.called
+
+    def test_update_query_returns_row_count(self):
+        """Should execute UPDATE query and return affected row count when fetch=False."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 3
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        count = execute_query(
+            mock_conn,
+            "UPDATE {table} SET {col} = %s WHERE {filter_col} = %s",
+            identifiers={"table": "accounts", "col": "status", "filter_col": "type"},
+            params=("inactive", "customer"),
+            fetch=False,
+        )
+
+        assert count == 3
+        mock_cursor.execute.assert_called_once()
+
+    def test_delete_query_returns_row_count(self):
+        """Should execute DELETE query and return affected row count when fetch=False."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 5
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        count = execute_query(
+            mock_conn,
+            "DELETE FROM {table} WHERE {col} = %s",
+            identifiers={"table": "accounts", "col": "status"},
+            params=("archived",),
+            fetch=False,
+        )
+
+        assert count == 5
+        mock_cursor.execute.assert_called_once()
+
+    def test_query_with_no_identifiers(self):
+        """Should execute query without identifiers (only params)."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(42,)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT COUNT(*) FROM accounts WHERE status = %s",
+            identifiers=None,
+            params=("active",),
+            fetch=True,
+        )
+
+        assert rows == [(42,)]
+        mock_cursor.execute.assert_called_once()
+
+    def test_query_with_no_params(self):
+        """Should execute query without params (only identifiers)."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(1,), (2,), (3,)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col} FROM {table}",
+            identifiers={"col": "id", "table": "accounts"},
+            params=None,
+            fetch=True,
+        )
+
+        assert len(rows) == 3
+        mock_cursor.execute.assert_called_once()
+
+    def test_query_with_no_identifiers_or_params(self):
+        """Should execute simple query without identifiers or params."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(5,)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT COUNT(*) FROM accounts",
+            fetch=True,
+        )
+
+        assert rows == [(5,)]
+        mock_cursor.execute.assert_called_once()
+
+    def test_query_with_multiple_params(self):
+        """Should handle multiple parameter values."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            (1, "Account A"),
+            (2, "Account B"),
+        ]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col1}, {col2} FROM {table} WHERE {col3} = %s AND {col4} > %s",
+            identifiers={
+                "col1": "id",
+                "col2": "name",
+                "table": "accounts",
+                "col3": "status",
+                "col4": "created_date",
+            },
+            params=("active", "2024-01-01"),
+            fetch=True,
+        )
+
+        assert len(rows) == 2
+        # Verify params were passed correctly
+        execute_call = mock_cursor.execute.call_args
+        assert execute_call[0][1] == ("active", "2024-01-01")
+
+    def test_query_uses_sql_identifier_for_safety(self):
+        """Should use psycopg2.sql.Identifier to prevent SQL injection on table/column names."""
+        from psycopg2 import sql
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        # Try to inject SQL via identifier - should be safely quoted
+        execute_query(
+            mock_conn,
+            "SELECT {col} FROM {table}",
+            identifiers={"col": "id", "table": "accounts; DROP TABLE users--"},
+            fetch=True,
+        )
+
+        # Verify query was constructed with SQL identifiers
+        execute_call = mock_cursor.execute.call_args
+        query_obj = execute_call[0][0]
+
+        # psycopg2.sql.SQL objects are composable, not plain strings
+        assert isinstance(query_obj, sql.Composable)
+
+    def test_query_logs_structure_not_params(self):
+        """Should log query structure but NEVER log parameter values (security)."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        sensitive_password = "super_secret_password_123"
+
+        with patch("sf_utils.db.connection.logger") as mock_logger:
+            execute_query(
+                mock_conn,
+                "SELECT {col} FROM {table} WHERE password = %s",
+                identifiers={"col": "id", "table": "users"},
+                params=(sensitive_password,),
+                fetch=True,
+            )
+
+            # Verify password not in any log call
+            for call_obj in mock_logger.debug.call_args_list:
+                log_message = str(call_obj)
+                assert sensitive_password not in log_message, \
+                    f"Sensitive parameter found in log: {log_message}"
+
+    def test_query_raises_database_error_on_execution_failure(self):
+        """Should raise DatabaseError when query execution fails."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = DatabaseError("syntax error")
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        with pytest.raises(DatabaseError) as exc_info:
+            execute_query(
+                mock_conn,
+                "INVALID SQL {table}",
+                identifiers={"table": "accounts"},
+                fetch=True,
+            )
+
+        assert "syntax error" in str(exc_info.value)
+
+    def test_query_raises_value_error_on_missing_identifier(self):
+        """Should raise ValueError when identifier placeholder is missing from dict."""
+        mock_conn = MagicMock()
+
+        with pytest.raises(ValueError) as exc_info:
+            execute_query(
+                mock_conn,
+                "SELECT {col1}, {col2} FROM {table}",
+                identifiers={"col1": "id", "table": "accounts"},  # Missing col2
+                fetch=True,
+            )
+
+        assert "col2" in str(exc_info.value)
+
+    def test_query_with_schema_qualified_table(self):
+        """Should handle schema-qualified table names."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(1,), (2,)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col} FROM {schema}.{table}",
+            identifiers={"col": "id", "schema": "public", "table": "accounts"},
+            fetch=True,
+        )
+
+        assert len(rows) == 2
+        mock_cursor.execute.assert_called_once()
+
+    def test_query_returns_empty_list_when_no_rows(self):
+        """Should return empty list when SELECT returns no rows."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col} FROM {table} WHERE {filter_col} = %s",
+            identifiers={"col": "id", "table": "accounts", "filter_col": "status"},
+            params=("nonexistent",),
+            fetch=True,
+        )
+
+        assert rows == []
+
+    def test_query_returns_zero_when_no_rows_affected(self):
+        """Should return 0 when UPDATE/DELETE affects no rows."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        count = execute_query(
+            mock_conn,
+            "UPDATE {table} SET {col} = %s WHERE {filter_col} = %s",
+            identifiers={"table": "accounts", "col": "status", "filter_col": "id"},
+            params=("inactive", 99999),
+            fetch=False,
+        )
+
+        assert count == 0
+
+    def test_query_with_complex_identifiers(self):
+        """Should handle multiple identifiers in complex query."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(100, 50, 25)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            """
+            SELECT
+                COUNT({col1}) as total,
+                COUNT(CASE WHEN {col2} = %s THEN 1 END) as active,
+                COUNT(CASE WHEN {col2} = %s THEN 1 END) as inactive
+            FROM {table}
+            WHERE {col3} > %s
+            """,
+            identifiers={
+                "col1": "id",
+                "col2": "status",
+                "col3": "created_date",
+                "table": "accounts",
+            },
+            params=("active", "inactive", "2024-01-01"),
+            fetch=True,
+        )
+
+        assert rows == [(100, 50, 25)]
+
+    def test_query_logging_debug_level(self):
+        """Should log at DEBUG level for query execution."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        with patch("sf_utils.db.connection.logger") as mock_logger:
+            execute_query(
+                mock_conn,
+                "SELECT {col} FROM {table}",
+                identifiers={"col": "id", "table": "accounts"},
+                fetch=True,
+            )
+
+            # Verify DEBUG logging was called
+            assert mock_logger.debug.called
+            # Should log: preparing, executing, and result count
+            assert mock_logger.debug.call_count >= 3
+
+    def test_query_closes_cursor_on_success(self):
+        """Should properly close cursor using context manager on success."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        execute_query(
+            mock_conn,
+            "SELECT {col} FROM {table}",
+            identifiers={"col": "id", "table": "accounts"},
+            fetch=True,
+        )
+
+        # Verify context manager was used (cursor.__exit__ called)
+        assert mock_conn.cursor.return_value.__exit__.called
+
+    def test_query_closes_cursor_on_error(self):
+        """Should properly close cursor using context manager even on error."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = DatabaseError("error")
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        with pytest.raises(DatabaseError):
+            execute_query(
+                mock_conn,
+                "SELECT {col} FROM {table}",
+                identifiers={"col": "id", "table": "accounts"},
+                fetch=True,
+            )
+
+        # Verify context manager __exit__ was called (cursor cleanup)
+        assert mock_conn.cursor.return_value.__exit__.called
+
+    def test_query_with_special_chars_in_params(self):
+        """Should safely handle special characters in parameter values."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(1, "O'Reilly's Account")]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        # SQL injection attempt via parameter - should be safely escaped by psycopg2
+        dangerous_value = "'; DROP TABLE users; --"
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col1}, {col2} FROM {table} WHERE {col2} = %s",
+            identifiers={"col1": "id", "col2": "name", "table": "accounts"},
+            params=(dangerous_value,),
+            fetch=True,
+        )
+
+        # Verify params were passed to execute (psycopg2 will safely escape them)
+        execute_call = mock_cursor.execute.call_args
+        assert execute_call[0][1] == (dangerous_value,)
+
+    def test_query_with_null_param(self):
+        """Should handle NULL parameter values."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(1, None)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col1}, {col2} FROM {table} WHERE {col2} IS NULL OR {col2} = %s",
+            identifiers={"col1": "id", "col2": "description", "table": "accounts"},
+            params=(None,),
+            fetch=True,
+        )
+
+        assert rows[0][1] is None
+
+    def test_query_with_numeric_params(self):
+        """Should handle numeric parameter values (int, float)."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(1, 100.50)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        rows = execute_query(
+            mock_conn,
+            "SELECT {col1}, {col2} FROM {table} WHERE {col1} = %s AND {col2} > %s",
+            identifiers={"col1": "id", "col2": "amount", "table": "transactions"},
+            params=(123, 99.99),
+            fetch=True,
+        )
+
+        execute_call = mock_cursor.execute.call_args
+        assert execute_call[0][1] == (123, 99.99)
