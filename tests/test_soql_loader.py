@@ -1,11 +1,13 @@
 """Tests for SOQL loader module."""
 
+import os
+import stat
 from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
-from sf_utils.sync.soql_loader import load_soql, render_soql
+from sf_utils.sync.soql_loader import load_soql, render_soql, validate_soql
 
 
 class TestLoadSOQLHappyPath:
@@ -491,3 +493,274 @@ WHERE CreatedDate >= ${start_date}
         assert "2024-01-01T00:00:00Z" in result
         assert "2024-02-01T00:00:00Z" in result
         assert "IsActive = true" in result
+
+
+class TestValidateSOQLHappyPath:
+    """Tests for successful SOQL validation scenarios."""
+
+    def test_validate_simple_query_passes(self):
+        """Should pass validation for simple SOQL query with date field in SELECT."""
+        soql = "SELECT Id, CreatedDate FROM Account"
+
+        # Should not raise any exception
+        validate_soql(soql, "CreatedDate")
+
+    def test_validate_case_insensitive_keywords(self):
+        """Should accept SELECT and FROM in any case combination."""
+        queries = [
+            "SELECT Id, CreatedDate FROM Account",
+            "select Id, CreatedDate from Account",
+            "Select Id, CreatedDate From Account",
+            "SeLeCt Id, CreatedDate FrOm Account"
+        ]
+
+        for query in queries:
+            validate_soql(query, "CreatedDate")
+
+    def test_validate_multiline_query(self):
+        """Should validate multiline SOQL queries correctly."""
+        soql = """SELECT
+            Id,
+            Name,
+            CreatedDate,
+            LastModifiedDate
+        FROM Account
+        WHERE IsActive = true"""
+
+        validate_soql(soql, "CreatedDate")
+        validate_soql(soql, "LastModifiedDate")
+
+    def test_validate_complex_query_with_subqueries(self):
+        """Should validate complex SOQL with subqueries."""
+        soql = """SELECT
+            Id,
+            Name,
+            CreatedDate,
+            (SELECT Id FROM Contacts WHERE LastModifiedDate > 2024-01-01)
+        FROM Account
+        WHERE Industry = 'Technology'"""
+
+        validate_soql(soql, "CreatedDate")
+
+    def test_validate_date_field_case_insensitive(self):
+        """Should match date field case-insensitively."""
+        soql = "SELECT Id, createddate FROM Account"
+
+        # Should pass regardless of case
+        validate_soql(soql, "CreatedDate")
+        validate_soql(soql, "createddate")
+        validate_soql(soql, "CREATEDDATE")
+
+    def test_validate_custom_date_field(self):
+        """Should validate custom date fields (ending with __c)."""
+        soql = "SELECT Id, Name, StartDate__c, EndDate__c FROM CustomObject__c"
+
+        validate_soql(soql, "StartDate__c")
+        validate_soql(soql, "EndDate__c")
+
+    def test_validate_with_file_path_normal_permissions(self, tmp_path):
+        """Should pass validation when file has normal permissions."""
+        soql_file = tmp_path / "test.soql"
+        soql_file.write_text("SELECT Id, CreatedDate FROM Account")
+        # Default permissions (not world-writable)
+        os.chmod(soql_file, 0o644)
+
+        soql = "SELECT Id, CreatedDate FROM Account"
+        # Should not raise or warn
+        validate_soql(soql, "CreatedDate", str(soql_file))
+
+
+class TestValidateSOQLErrors:
+    """Tests for validation errors in SOQL queries."""
+
+    def test_validate_missing_select_keyword(self):
+        """Should raise ValueError when SELECT keyword is missing."""
+        soql = "Id, CreatedDate FROM Account"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        assert "SELECT keyword" in str(exc_info.value)
+
+    def test_validate_missing_from_keyword(self):
+        """Should raise ValueError when FROM keyword is missing."""
+        soql = "SELECT Id, CreatedDate"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        assert "FROM keyword" in str(exc_info.value)
+
+    def test_validate_date_field_not_in_select(self):
+        """Should raise ValueError when date field is not in SELECT clause."""
+        soql = "SELECT Id, Name FROM Account"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        error_msg = str(exc_info.value)
+        assert "CreatedDate" in error_msg
+        assert "not found in SELECT clause" in error_msg
+
+    def test_validate_dangerous_keyword_drop(self):
+        """Should raise ValueError for DROP keyword."""
+        soql = "DROP TABLE Account"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        error_msg = str(exc_info.value)
+        assert "DROP" in error_msg
+        assert "not allowed" in error_msg
+
+    def test_validate_dangerous_keyword_delete(self):
+        """Should raise ValueError for DELETE keyword."""
+        soql = "DELETE FROM Account WHERE Id = '001xxx'"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        error_msg = str(exc_info.value)
+        assert "DELETE" in error_msg
+        assert "not allowed" in error_msg
+
+    def test_validate_dangerous_keyword_truncate(self):
+        """Should raise ValueError for TRUNCATE keyword."""
+        soql = "TRUNCATE TABLE Account"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        error_msg = str(exc_info.value)
+        assert "TRUNCATE" in error_msg
+
+    def test_validate_dangerous_keyword_insert(self):
+        """Should raise ValueError for INSERT keyword."""
+        soql = "INSERT INTO Account (Name) VALUES ('Test')"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        error_msg = str(exc_info.value)
+        assert "INSERT" in error_msg
+
+    def test_validate_dangerous_keyword_update(self):
+        """Should raise ValueError for UPDATE keyword."""
+        soql = "UPDATE Account SET Name = 'Test' WHERE Id = '001xxx'"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        error_msg = str(exc_info.value)
+        assert "UPDATE" in error_msg
+
+    def test_validate_dangerous_keyword_case_insensitive(self):
+        """Should detect dangerous keywords regardless of case."""
+        dangerous_queries = [
+            "drop table Account",
+            "DROP TABLE Account",
+            "DeLeTe FROM Account",
+            "TRUNCATE TABLE Account",
+            "insert into Account",
+            "UPDATE Account SET Name = 'Test'"
+        ]
+
+        for query in dangerous_queries:
+            with pytest.raises(ValueError) as exc_info:
+                validate_soql(query, "CreatedDate")
+            assert "not allowed" in str(exc_info.value)
+
+
+class TestValidateSOQLEdgeCases:
+    """Tests for edge cases in SOQL validation."""
+
+    def test_validate_date_field_with_alias(self):
+        """Should find date field even when aliased."""
+        soql = "SELECT Id, CreatedDate AS created FROM Account"
+
+        # Should still find CreatedDate in SELECT clause
+        validate_soql(soql, "CreatedDate")
+
+    def test_validate_date_field_partial_match_fails(self):
+        """Should not match partial field names."""
+        soql = "SELECT Id, MyCreatedDate FROM Account"
+
+        # Should not match "CreatedDate" within "MyCreatedDate"
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        assert "not found in SELECT clause" in str(exc_info.value)
+
+    def test_validate_select_star_fails_date_check(self):
+        """Should fail validation for SELECT * (can't verify date field)."""
+        soql = "SELECT * FROM Account"
+
+        # Can't verify date field is in SELECT clause
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "CreatedDate")
+
+        assert "not found in SELECT clause" in str(exc_info.value)
+
+    def test_validate_word_boundary_date_field(self):
+        """Should use word boundaries for date field matching."""
+        soql = "SELECT Id, LastModifiedDate, CreatedDate FROM Account"
+
+        # Should match exact field name, not partial
+        validate_soql(soql, "CreatedDate")
+        validate_soql(soql, "LastModifiedDate")
+
+        # Should NOT match substring
+        with pytest.raises(ValueError):
+            validate_soql(soql, "Modified")
+
+    def test_validate_file_path_world_writable_logs_warning(self, tmp_path, caplog):
+        """Should log warning when file has world-writable permissions."""
+        soql_file = tmp_path / "insecure.soql"
+        soql_file.write_text("SELECT Id, CreatedDate FROM Account")
+        # Set world-writable permission
+        os.chmod(soql_file, 0o666)
+
+        soql = "SELECT Id, CreatedDate FROM Account"
+
+        # Import logging to set log level
+        import logging
+        with caplog.at_level(logging.WARNING):
+            validate_soql(soql, "CreatedDate", str(soql_file))
+
+        # Should log warning but not raise
+        assert "world-writable" in caplog.text.lower()
+
+    def test_validate_file_path_nonexistent_no_error(self):
+        """Should not fail when file_path doesn't exist (permission check is optional)."""
+        soql = "SELECT Id, CreatedDate FROM Account"
+
+        # Should not raise even if file doesn't exist
+        validate_soql(soql, "CreatedDate", "/nonexistent/path/query.soql")
+
+    def test_validate_empty_soql_fails(self):
+        """Should fail validation for empty query."""
+        soql = ""
+
+        with pytest.raises(ValueError):
+            validate_soql(soql, "CreatedDate")
+
+    def test_validate_dangerous_keyword_in_string_literal(self):
+        """Should detect dangerous keywords even in string literals."""
+        # Note: This is intentionally strict - dangerous keywords in any context
+        soql = "SELECT Id FROM Account WHERE Name = 'DROP TABLE Test'"
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_soql(soql, "Id")
+
+        assert "DROP" in str(exc_info.value)
+
+    def test_validate_multiple_from_clauses_subquery(self):
+        """Should parse SELECT clause correctly even with subquery FROM."""
+        soql = """SELECT
+            Id,
+            CreatedDate,
+            (SELECT Id FROM Contacts)
+        FROM Account"""
+
+        # Should extract the main SELECT clause (Id, CreatedDate, subquery)
+        validate_soql(soql, "CreatedDate")
