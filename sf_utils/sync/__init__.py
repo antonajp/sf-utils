@@ -1,6 +1,6 @@
 """Sync utilities for Salesforce data synchronization."""
 
-from sf_utils.sync.soql_loader import load_soql
+from sf_utils.sync.soql_loader import load_soql, render_soql
 from sf_utils.sync.state import (
     SyncStateRow,
     ensure_sync_state_table,
@@ -10,6 +10,7 @@ from sf_utils.sync.state import (
 
 __all__ = [
     "load_soql",
+    "render_soql",
     "SyncStateRow",
     "ensure_sync_state_table",
     "get_sync_state",
