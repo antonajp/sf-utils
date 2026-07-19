@@ -103,8 +103,29 @@ sf-sprint-runner         # Batch: orchestrates multiple tickets with CI/merge
 - **Database**: PostgreSQL (Docker container, psycopg2)
 - **Export**: openpyxl (Excel), csv (stdlib)
 - **Config**: python-dotenv
+- **CLI**: click (cross-platform argument parsing)
 - **Testing**: pytest, pytest-cov
 - **CI/CD**: GitHub Actions (planned)
+
+### Cross-Platform Standards
+
+This library must work on Linux, macOS, and Windows (PowerShell):
+
+- **Paths**: Always use `pathlib.Path`, never string concatenation with `/` or `\`
+- **CLI**: Use `click` with `path_type=Path` for file arguments
+- **Environment**: Use `python-dotenv` for .env files (works identically everywhere)
+- **Temp Files**: Use `tempfile` module for cross-platform temporary directories
+- **Subprocess**: Avoid shell-specific syntax; use list form of subprocess calls
+- **Testing**: GitHub Actions matrix must include `ubuntu-latest`, `macos-latest`, `windows-latest`
+
+```python
+# Correct - cross-platform
+from pathlib import Path
+config_path = Path("soql") / "accounts.soql"
+
+# Incorrect - breaks on Windows
+config_path = "soql/" + "accounts.soql"
+```
 
 ### Project Structure
 ```
