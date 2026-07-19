@@ -2,10 +2,11 @@
 
 import logging
 import re
-from typing import List
+from typing import Any, Dict, List, Tuple
 
 import psycopg2
 from psycopg2 import extensions, sql
+from psycopg2.extras import execute_values
 
 logger = logging.getLogger(__name__)
 
@@ -231,5 +232,184 @@ def create_table_from_query(
             str(e),
         )
         raise
+    finally:
+        cursor.close()
+
+
+def upsert_records(
+    table_name: str,
+    records: List[Dict[str, Any]],
+    connection: extensions.connection,
+    *,
+    batch_size: int = 500,
+) -> Tuple[int, int]:
+    """Upsert records to PostgreSQL table.
+
+    Inserts new records or updates existing ones based on the 'id' field.
+    Uses PostgreSQL's INSERT ... ON CONFLICT DO UPDATE for efficient upserts.
+
+    Args:
+        table_name: Name of the target table.
+        records: List of record dictionaries to upsert. Each record must contain an 'id' key.
+        connection: Active psycopg2 connection.
+        batch_size: Number of records per batch (default 500).
+
+    Returns:
+        Tuple of (inserted_count, updated_count).
+
+    Raises:
+        psycopg2.DatabaseError: On SQL errors with table name and record count context.
+        ValueError: On invalid input (empty table name, non-list records, empty records).
+
+    Example:
+        >>> from sf_utils.db import get_connection, upsert_records
+        >>> conn = get_connection()
+        >>> inserted, updated = upsert_records(
+        ...     table_name="sf_account",
+        ...     records=[
+        ...         {"id": "001abc", "name": "Acme Corp", "status": "active"},
+        ...         {"id": "002def", "name": "Globex", "status": "inactive"},
+        ...     ],
+        ...     connection=conn,
+        ...     batch_size=500
+        ... )
+        >>> print(f"Inserted: {inserted}, Updated: {updated}")
+    """
+    logger.debug(
+        "upsert_records: table_name=%s record_count=%d batch_size=%d",
+        table_name,
+        len(records),
+        batch_size,
+    )
+
+    # Validate inputs
+    if not table_name or not isinstance(table_name, str):
+        error_msg = "table_name must be a non-empty string"
+        logger.error("Invalid input: %s", error_msg)
+        raise ValueError(error_msg)
+
+    if not isinstance(records, list):
+        error_msg = "records must be a list"
+        logger.error("Invalid input: %s", error_msg)
+        raise ValueError(error_msg)
+
+    if not records:
+        logger.info("No records to upsert for table: %s", table_name)
+        return (0, 0)
+
+    # Validate all records have 'id' field
+    if not all("id" in record for record in records):
+        error_msg = "All records must contain an 'id' field"
+        logger.error("Invalid input: %s", error_msg)
+        raise ValueError(error_msg)
+
+    total_records = len(records)
+    total_inserted = 0
+    total_updated = 0
+    cursor = connection.cursor()
+
+    try:
+        # Extract column names from first record
+        # All records must have the same structure
+        columns = list(records[0].keys())
+        logger.debug("Upserting %d columns: %s", len(columns), columns)
+
+        # Build column identifiers
+        column_identifiers = [sql.Identifier(col) for col in columns]
+
+        # Build SET clause for UPDATE (exclude 'id' since it's the conflict target)
+        update_columns = [col for col in columns if col != "id"]
+        set_clause = sql.SQL(", ").join(
+            [
+                sql.SQL("{} = EXCLUDED.{}").format(
+                    sql.Identifier(col), sql.Identifier(col)
+                )
+                for col in update_columns
+            ]
+        )
+
+        # Process records in batches
+        for batch_start in range(0, total_records, batch_size):
+            batch_end = min(batch_start + batch_size, total_records)
+            batch = records[batch_start:batch_end]
+
+            # Convert records to tuples in column order
+            values = [tuple(record.get(col) for col in columns) for record in batch]
+
+            # Build UPSERT query with manual placeholders
+            # Use xmax = 0 in RETURNING to distinguish inserts (xmax=0) from updates (xmax>0)
+
+            # Build placeholder template for VALUES clause: (%s, %s, %s, ...)
+            value_template = sql.SQL("({})").format(
+                sql.SQL(", ").join(sql.Placeholder() for _ in columns)
+            )
+
+            # Build full VALUES clause with placeholders for all records
+            values_clause = sql.SQL(", ").join([value_template] * len(batch))
+
+            # Build complete UPSERT query
+            upsert_query = sql.SQL(
+                "INSERT INTO {table} ({columns}) VALUES {values} ON CONFLICT (id) DO UPDATE SET {set_clause} RETURNING (xmax = 0) AS inserted"
+            ).format(
+                table=sql.Identifier(table_name),
+                columns=sql.SQL(", ").join(column_identifiers),
+                values=values_clause,
+                set_clause=set_clause,
+            )
+
+            # Execute batch upsert
+            logger.debug(
+                "Executing batch upsert: records %d-%d of %d",
+                batch_start + 1,
+                batch_end,
+                total_records,
+            )
+
+            # Flatten values for parameterized query
+            flat_values = [val for record_tuple in values for val in record_tuple]
+
+            # Execute with parameterized values
+            cursor.execute(upsert_query, flat_values)
+
+            # Count inserts vs updates using xmax
+            results = cursor.fetchall()
+            batch_inserted = sum(1 for (is_insert,) in results if is_insert)
+            batch_updated = len(results) - batch_inserted
+
+            total_inserted += batch_inserted
+            total_updated += batch_updated
+
+            # Commit per batch
+            connection.commit()
+
+            logger.info(
+                "Upserted %d/%d records to %s (inserted: %d, updated: %d)",
+                batch_end,
+                total_records,
+                table_name,
+                batch_inserted,
+                batch_updated,
+            )
+
+        logger.info(
+            "Upsert complete for %s: %d inserted, %d updated (total: %d)",
+            table_name,
+            total_inserted,
+            total_updated,
+            total_records,
+        )
+        return (total_inserted, total_updated)
+
+    except psycopg2.Error as e:
+        connection.rollback()
+        logger.error(
+            "Failed to upsert %d records to table %s: %s",
+            total_records,
+            table_name,
+            str(e),
+        )
+        raise psycopg2.DatabaseError(
+            f"Failed to upsert {total_records} records to table {table_name}: {e}"
+        ) from e
     finally:
         cursor.close()
