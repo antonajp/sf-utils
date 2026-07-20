@@ -36,10 +36,9 @@ def _sanitize_column_name(name: str) -> str:
     # Convert to lowercase
     sanitized = name.lower()
     # Replace special chars (spaces, dots, etc.) with underscores
+    # Preserve existing underscores (important for Salesforce __c, __r suffixes)
     sanitized = re.sub(r"[^a-z0-9_]", "_", sanitized)
-    # Remove consecutive underscores
-    sanitized = re.sub(r"_+", "_", sanitized)
-    # Remove leading/trailing underscores
+    # Remove leading/trailing underscores only
     sanitized = sanitized.strip("_")
     logger.debug("Sanitized column name: %s -> %s", name, sanitized)
     return sanitized
@@ -129,6 +128,92 @@ def _parse_select_columns(soql: str) -> List[str]:
     return columns
 
 
+def _get_existing_columns(
+    table_name: str,
+    db_conn: extensions.connection,
+) -> List[str]:
+    """Get list of existing column names from a PostgreSQL table.
+
+    Args:
+        table_name: PostgreSQL table name.
+        db_conn: psycopg2 database connection.
+
+    Returns:
+        List of column names (lowercase) or empty list if table doesn't exist.
+    """
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (table_name,)
+        )
+        columns = [row[0] for row in cursor.fetchall()]
+        logger.debug("Existing columns for %s: %s", table_name, columns)
+        return columns
+    finally:
+        cursor.close()
+
+
+def _add_missing_columns(
+    table_name: str,
+    required_columns: List[str],
+    existing_columns: List[str],
+    db_conn: extensions.connection,
+) -> List[str]:
+    """Add missing columns to an existing table.
+
+    Args:
+        table_name: PostgreSQL table name.
+        required_columns: List of required column names (lowercase).
+        existing_columns: List of existing column names (lowercase).
+        db_conn: psycopg2 database connection.
+
+    Returns:
+        List of column names that were added.
+    """
+    # Find missing columns (case-insensitive comparison)
+    existing_set = {col.lower() for col in existing_columns}
+    missing = [col for col in required_columns if col.lower() not in existing_set]
+
+    if not missing:
+        logger.debug("No missing columns for table %s", table_name)
+        return []
+
+    logger.info(
+        "Adding %d missing column(s) to %s: %s",
+        len(missing),
+        table_name,
+        missing,
+    )
+
+    cursor = db_conn.cursor()
+    try:
+        for col in missing:
+            # All columns are TEXT type for flexibility
+            alter_stmt = sql.SQL("ALTER TABLE {} ADD COLUMN {} TEXT").format(
+                sql.Identifier(table_name),
+                sql.Identifier(col),
+            )
+            logger.debug("Executing: ALTER TABLE %s ADD COLUMN %s TEXT", table_name, col)
+            cursor.execute(alter_stmt)
+
+        db_conn.commit()
+        logger.info("Successfully added %d column(s) to %s", len(missing), table_name)
+        return missing
+
+    except psycopg2.Error as e:
+        db_conn.rollback()
+        logger.error("Failed to add columns to %s: %s", table_name, str(e))
+        raise
+    finally:
+        cursor.close()
+
+
 def create_table_from_query(
     table_name: str,
     soql_query: str,
@@ -137,6 +222,9 @@ def create_table_from_query(
     if_not_exists: bool = True,
 ) -> bool:
     """Create a PostgreSQL table from SOQL SELECT columns.
+
+    If the table already exists, adds any missing columns from the SOQL query.
+    This handles schema evolution when new fields are added to the SOQL.
 
     Args:
         table_name: PostgreSQL table name (e.g., 'sf_account').
@@ -203,31 +291,37 @@ def create_table_from_query(
         columns=sql.SQL(", ").join(column_defs),
     )
 
-    # Execute CREATE TABLE
+    # Check if table already exists before attempting CREATE
+    existing_columns = _get_existing_columns(table_name, db_conn)
+    table_existed = len(existing_columns) > 0
+
+    if table_existed:
+        logger.debug("Table %s already exists with %d columns", table_name, len(existing_columns))
+        # Add any missing columns from the SOQL query
+        added = _add_missing_columns(table_name, columns, existing_columns, db_conn)
+        if added:
+            logger.info(
+                "Table %s: added %d new column(s): %s",
+                table_name,
+                len(added),
+                added,
+            )
+        return False  # Table was not newly created
+
+    # Execute CREATE TABLE for new table
     cursor = db_conn.cursor()
     try:
         logger.debug("Executing CREATE TABLE for table: %s with %d columns", table_name, len(columns))
         cursor.execute(create_stmt)
         db_conn.commit()
 
-        # Check if table was actually created (rowcount doesn't work for DDL)
-        # Query pg_catalog to check if table existed before
-        cursor.execute(
-            sql.SQL("SELECT to_regclass({})").format(sql.Literal(table_name))
+        logger.info(
+            "Table created successfully: %s with %d columns: %s",
+            table_name,
+            len(columns),
+            columns,
         )
-        table_exists = cursor.fetchone()[0] is not None
-
-        if table_exists:
-            logger.info(
-                "Table created successfully: %s with %d columns: %s",
-                table_name,
-                len(columns),
-                columns,
-            )
-            return True
-        else:
-            logger.info("Table already existed: %s", table_name)
-            return False
+        return True  # Table was newly created
 
     except psycopg2.Error as e:
         db_conn.rollback()
