@@ -2,15 +2,21 @@
 
 import csv
 import logging
+import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
 import requests
+from psycopg2 import extensions
 from SalesforcePy.sfdc import Client
 
 from sf_utils.client import get_client
+from sf_utils.db import create_table_from_query, get_connection, upsert_records
 from sf_utils.exceptions import SalesforceAPIError, SalesforceAuthError, _sanitize_value
 from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG, with_retry, raise_for_status
+from sf_utils.sync.rest_sync import SyncResult, _inject_incremental_filter
+from sf_utils.sync.state import ensure_sync_state_table, get_sync_state, update_sync_state
 
 logger = logging.getLogger(__name__)
 
@@ -743,3 +749,255 @@ def get_bulk_results(
         job_id,
         total_processed
     )
+
+
+def sync_records_bulk(
+    soql: str,
+    object_name: str,
+    *,
+    date_field: str = "LastModifiedDate",
+    batch_size: int = 1000,
+    poll_interval: float = 5.0,
+    timeout: float = 600.0,
+    client: Optional[Client] = None,
+    db_conn: Optional[extensions.connection] = None,
+) -> SyncResult:
+    """Execute a Bulk API 2.0 sync for a Salesforce object.
+
+    Orchestrates the complete Bulk API sync workflow:
+    1. Gets watermark from sync state
+    2. Injects watermark filter into SOQL
+    3. Creates Bulk API 2.0 query job
+    4. Polls job until completion
+    5. Creates/updates PostgreSQL table
+    6. Downloads CSV results in batches
+    7. Upserts each batch to database
+    8. Updates sync state watermark on success
+
+    Args:
+        soql: SOQL query string. Must include Id field and the date_field in SELECT.
+        object_name: Salesforce object name for sync state tracking (e.g., 'Account').
+        date_field: Date/datetime field for incremental sync. Defaults to 'LastModifiedDate'.
+        batch_size: Number of records to process per batch. Defaults to 1000.
+        poll_interval: Initial polling interval in seconds. Defaults to 5.0.
+        timeout: Maximum time to poll job in seconds. Defaults to 600.0 (10 minutes).
+        client: Authenticated Salesforce client. Creates one if not provided.
+        db_conn: Active psycopg2 connection. Creates one if not provided.
+
+    Returns:
+        SyncResult with sync statistics.
+
+    Raises:
+        ValueError: If inputs are invalid.
+        SalesforceAuthError: If authentication fails (401/403).
+        SalesforceAPIError: If job creation, polling, or results download fails.
+        psycopg2.Error: On database errors.
+
+    Example:
+        >>> from sf_utils.sync import sync_records_bulk
+        >>>
+        >>> # Sync Account records using Bulk API
+        >>> result = sync_records_bulk(
+        ...     soql="SELECT Id, Name, LastModifiedDate FROM Account",
+        ...     object_name="Account",
+        ...     date_field="LastModifiedDate",
+        ...     batch_size=1000,
+        ...     timeout=1800.0  # 30 minutes for large datasets
+        ... )
+        >>> print(f"Fetched: {result.records_fetched}, "
+        ...       f"Inserted: {result.records_inserted}, "
+        ...       f"Updated: {result.records_updated}")
+        >>>
+        >>> # Sync with custom date field
+        >>> result = sync_records_bulk(
+        ...     soql="SELECT Id, Name, CreatedDate FROM Opportunity",
+        ...     object_name="Opportunity",
+        ...     date_field="CreatedDate"
+        ... )
+
+    Notes:
+        - Watermark is ONLY updated on successful completion
+        - Database transactions are rolled back on any failure
+        - CSV column keys are normalized to lowercase
+        - Uses Bulk API 2.0 for large datasets (up to 150M records)
+        - Results are processed in batches to minimize memory usage
+    """
+    logger.info(
+        "Starting sync_records_bulk: object_name=%s date_field=%s batch_size=%d timeout=%.1fs",
+        object_name,
+        date_field,
+        batch_size,
+        timeout,
+    )
+
+    start_time = datetime.now(timezone.utc)
+
+    # Validate inputs
+    if not soql or not soql.strip():
+        raise ValueError("soql cannot be empty")
+    if not object_name or not object_name.strip():
+        raise ValueError("object_name cannot be empty")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if poll_interval <= 0:
+        raise ValueError("poll_interval must be positive")
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+
+    # Initialize client if not provided
+    if client is None:
+        logger.debug("Creating Salesforce client from environment")
+        client = get_client()
+
+    # Initialize db_conn if not provided
+    owns_db_conn = False
+    if db_conn is None:
+        logger.debug("Creating PostgreSQL connection from environment")
+        db_conn = get_connection()
+        owns_db_conn = True
+
+    try:
+        # Ensure sync state table exists
+        ensure_sync_state_table(db_conn)
+
+        # Determine table name from object_name
+        table_name = f"sf_{object_name.lower()}"
+        logger.debug("Using table name: %s", table_name)
+
+        # Get sync state watermark
+        sync_state = get_sync_state(object_name=object_name, db_conn=db_conn)
+        modified_soql = soql
+
+        if sync_state:
+            watermark = sync_state.last_sync_timestamp
+            logger.info(
+                "Retrieved watermark for %s: %s",
+                object_name,
+                watermark.isoformat(),
+            )
+
+            # Inject watermark filter into SOQL
+            modified_soql = _inject_incremental_filter(soql, date_field, watermark)
+        else:
+            logger.info(
+                "No previous sync state for %s - performing initial full sync",
+                object_name,
+            )
+
+        # Create Bulk API 2.0 query job
+        logger.info("Creating Bulk API 2.0 job for %s", object_name)
+        job_id = create_bulk_query_job(
+            sobject_type=object_name,
+            soql_query=modified_soql,
+            client=client,
+        )
+        logger.info("Bulk job created: job_id=%s", job_id)
+
+        # Poll job until completion
+        logger.info("Polling job until completion: job_id=%s", job_id)
+        job_info = poll_bulk_job(
+            job_id=job_id,
+            client=client,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+        logger.info(
+            "Bulk job completed: job_id=%s records=%d",
+            job_id,
+            job_info.get('numberRecordsProcessed', 0),
+        )
+
+        # Create/update table schema
+        logger.debug("Ensuring table exists: %s", table_name)
+        create_table_from_query(
+            table_name=table_name,
+            soql_query=soql,
+            db_conn=db_conn,
+            if_not_exists=True,
+        )
+
+        # Download and upsert results in batches
+        records_inserted = 0
+        records_updated = 0
+        total_records = 0
+
+        logger.info("Downloading and processing results: job_id=%s batch_size=%d", job_id, batch_size)
+
+        for batch in get_bulk_results(job_id=job_id, client=client, batch_size=batch_size):
+            # Normalize column keys to lowercase
+            normalized_batch = []
+            for record in batch:
+                normalized_record = {k.lower(): v for k, v in record.items()}
+                normalized_batch.append(normalized_record)
+
+            total_records += len(normalized_batch)
+
+            # Upsert batch to database
+            logger.debug("Upserting batch of %d records to %s", len(normalized_batch), table_name)
+            inserted, updated = upsert_records(
+                table_name=table_name,
+                records=normalized_batch,
+                connection=db_conn,
+                batch_size=batch_size,
+            )
+
+            records_inserted += inserted
+            records_updated += updated
+
+            logger.info(
+                "Batch upserted: total_processed=%d inserted=%d updated=%d",
+                total_records,
+                records_inserted,
+                records_updated,
+            )
+
+        # Update sync state with current timestamp ONLY on success
+        if total_records > 0:
+            new_watermark = datetime.now(timezone.utc)
+            logger.debug("Updating sync state with watermark: %s", new_watermark.isoformat())
+            update_sync_state(
+                object_name=object_name,
+                timestamp=new_watermark,
+                db_conn=db_conn,
+                mode="incremental",
+            )
+            db_conn.commit()
+            logger.info("Sync state updated for %s", object_name)
+        else:
+            logger.info("No records to sync for %s", object_name)
+
+        end_time = datetime.now(timezone.utc)
+
+        result = SyncResult(
+            object_name=object_name,
+            records_fetched=total_records,
+            records_inserted=records_inserted,
+            records_updated=records_updated,
+            sync_mode="incremental",
+            start_timestamp=start_time,
+            end_timestamp=end_time,
+            date_field=date_field,
+        )
+
+        logger.info(
+            "Bulk sync complete for %s: fetched=%d inserted=%d updated=%d duration=%.2fs",
+            object_name,
+            total_records,
+            records_inserted,
+            records_updated,
+            (end_time - start_time).total_seconds(),
+        )
+
+        return result
+
+    except Exception as e:
+        # Rollback on error - DO NOT update watermark
+        db_conn.rollback()
+        logger.error("Bulk sync failed for %s: %s", object_name, str(e))
+        raise
+
+    finally:
+        # Close connection if we created it
+        if owns_db_conn:
+            logger.debug("Closing database connection")
+            db_conn.close()
