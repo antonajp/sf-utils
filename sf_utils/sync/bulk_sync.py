@@ -880,18 +880,9 @@ def sync_records_bulk(
             modified_soql = _inject_incremental_filter(soql, date_field, watermark)
         else:
             logger.info(
-                "No previous sync state for %s - using SOQL as-is (no watermark filter)",
+                "No previous sync state for %s - performing initial full sync",
                 object_name,
             )
-
-        # Log the actual query being sent (check for WHERE clause)
-        has_where = "WHERE" in modified_soql.upper()
-        logger.info(
-            "SOQL query for Bulk API: has_where=%s, length=%d chars",
-            has_where,
-            len(modified_soql),
-        )
-        logger.debug("Full SOQL query:\n%s", modified_soql)
 
         # Create Bulk API 2.0 query job
         logger.info("Creating Bulk API 2.0 job for %s", object_name)
