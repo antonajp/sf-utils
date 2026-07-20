@@ -16,12 +16,14 @@ import psycopg2
 from psycopg2 import sql
 
 from sf_utils.db.schema import (
+    create_table_from_describe,
     create_table_from_query,
     upsert_records,
     _parse_select_columns,
     _sanitize_column_name,
     _extract_alias,
 )
+from sf_utils.db.types import SALESFORCE_TYPE_TO_POSTGRES, get_postgres_type
 
 
 class TestSanitizeColumnName:
@@ -1095,3 +1097,653 @@ class TestUpsertRecordsIntegration:
         assert any(args[1:3] == (750, 750) for args in call_args if len(args) >= 3)
         # Check table name appears
         assert any("sf_account" in args for args in call_args)
+
+
+class TestSalesforceTypeToPostgres:
+    """Tests for SALESFORCE_TYPE_TO_POSTGRES constant."""
+
+    def test_text_based_types(self):
+        """Should map text-based Salesforce types to TEXT."""
+        text_types = [
+            "id", "reference", "string", "textarea", "picklist",
+            "multipicklist", "email", "url", "phone", "encryptedstring",
+            "combobox", "base64", "datacategorygroupreference",
+        ]
+        for sf_type in text_types:
+            assert SALESFORCE_TYPE_TO_POSTGRES.get(sf_type) == "TEXT", f"Expected {sf_type} -> TEXT"
+
+    def test_numeric_types(self):
+        """Should map numeric Salesforce types correctly."""
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("int") == "INTEGER"
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("double") == "NUMERIC"
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("currency") == "NUMERIC"
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("percent") == "NUMERIC"
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("long") == "BIGINT"
+
+    def test_boolean_type(self):
+        """Should map boolean to BOOLEAN."""
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("boolean") == "BOOLEAN"
+
+    def test_datetime_types(self):
+        """Should map date/time types correctly."""
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("date") == "DATE"
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("datetime") == "TIMESTAMP WITH TIME ZONE"
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("time") == "TIME"
+
+    def test_complex_types_to_jsonb(self):
+        """Should map complex types to JSONB."""
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("location") == "JSONB"
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("address") == "JSONB"
+
+    def test_anytype(self):
+        """Should map anyType to TEXT."""
+        assert SALESFORCE_TYPE_TO_POSTGRES.get("anytype") == "TEXT"
+
+
+class TestGetPostgresType:
+    """Tests for get_postgres_type helper function."""
+
+    def test_known_types_return_correct_mapping(self):
+        """Should return correct PostgreSQL type for known Salesforce types."""
+        assert get_postgres_type("string") == "TEXT"
+        assert get_postgres_type("double") == "NUMERIC"
+        assert get_postgres_type("boolean") == "BOOLEAN"
+        assert get_postgres_type("datetime") == "TIMESTAMP WITH TIME ZONE"
+        assert get_postgres_type("date") == "DATE"
+
+    def test_case_insensitive_lookup(self):
+        """Should handle case-insensitive type lookup."""
+        assert get_postgres_type("STRING") == "TEXT"
+        assert get_postgres_type("String") == "TEXT"
+        assert get_postgres_type("DATETIME") == "TIMESTAMP WITH TIME ZONE"
+        assert get_postgres_type("Boolean") == "BOOLEAN"
+
+    @patch("sf_utils.db.types.logger")
+    def test_unknown_type_returns_text_with_warning(self, mock_logger):
+        """Should return TEXT and log WARNING for unknown types."""
+        result = get_postgres_type("unknown_type_xyz")
+
+        assert result == "TEXT"
+        assert mock_logger.warning.called
+        warning_call = str(mock_logger.warning.call_args)
+        assert "unknown_type_xyz" in warning_call
+
+    def test_custom_type_mapper_overrides_default(self):
+        """Should use custom type mapper when provided."""
+        def custom_mapper(sf_type):
+            if sf_type == "string":
+                return "VARCHAR(255)"
+            return None
+
+        assert get_postgres_type("string", type_mapper=custom_mapper) == "VARCHAR(255)"
+        # Other types should fall back to default
+        assert get_postgres_type("double", type_mapper=custom_mapper) == "NUMERIC"
+
+    def test_custom_type_mapper_returns_none_uses_default(self):
+        """Should use default mapping when custom mapper returns None."""
+        def custom_mapper(sf_type):
+            return None  # Always return None
+
+        assert get_postgres_type("string", type_mapper=custom_mapper) == "TEXT"
+        assert get_postgres_type("datetime", type_mapper=custom_mapper) == "TIMESTAMP WITH TIME ZONE"
+
+    def test_custom_type_mapper_for_unknown_types(self):
+        """Should allow custom mapper to handle unknown types."""
+        def custom_mapper(sf_type):
+            if sf_type == "customtype":
+                return "CUSTOM_PG_TYPE"
+            return None
+
+        assert get_postgres_type("customtype", type_mapper=custom_mapper) == "CUSTOM_PG_TYPE"
+
+
+class TestCreateTableFromDescribe:
+    """Tests for create_table_from_describe function."""
+
+    def _mock_describe_result(self, fields_metadata):
+        """Helper to create mock describe result."""
+        return {
+            "name": "Account",
+            "fields": [
+                {"name": name, "type": sf_type}
+                for name, sf_type in fields_metadata.items()
+            ]
+        }
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_with_typed_columns(self, mock_describe):
+        """Should create table with typed columns from describe metadata."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+            "AnnualRevenue": "currency",
+            "CreatedDate": "datetime",
+            "IsActive": "boolean",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        result = create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name", "AnnualRevenue", "CreatedDate", "IsActive"],
+            db_conn=mock_conn,
+        )
+
+        assert result is True
+        mock_describe.assert_called_once()
+        mock_cursor.execute.assert_called()
+        mock_conn.commit.assert_called_once()
+        mock_cursor.close.assert_called_once()
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_uses_sql_identifier(self, mock_describe):
+        """Should use psycopg2.sql.Identifier for table and column names."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            db_conn=mock_conn,
+        )
+
+        # Verify execute was called with sql.Composed object
+        create_call = mock_cursor.execute.call_args_list[0]
+        executed_query = create_call[0][0]
+        assert isinstance(executed_query, sql.Composed)
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_id_is_primary_key(self, mock_describe):
+        """Should make Id column PRIMARY KEY."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            db_conn=mock_conn,
+        )
+
+        # Verify execute was called with sql.Composed containing PRIMARY KEY
+        create_call = mock_cursor.execute.call_args_list[0]
+        executed_query = create_call[0][0]
+        assert isinstance(executed_query, sql.Composed)
+        # Check repr of the composed query for PRIMARY KEY
+        query_repr = repr(executed_query)
+        assert "PRIMARY KEY" in query_repr
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_maps_all_types_correctly(self, mock_describe):
+        """Should map all Salesforce types to correct PostgreSQL types."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+            "Revenue": "currency",
+            "Count": "int",
+            "Percentage": "percent",
+            "IsActive": "boolean",
+            "StartDate": "date",
+            "CreatedAt": "datetime",
+            "StartTime": "time",
+            "Location__c": "location",
+            "Address": "address",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name", "Revenue", "Count", "Percentage", "IsActive",
+                   "StartDate", "CreatedAt", "StartTime", "Location__c", "Address"],
+            db_conn=mock_conn,
+        )
+
+        # Verify table was created
+        assert mock_cursor.execute.called
+        query_repr = repr(mock_cursor.execute.call_args_list[0][0][0])
+
+        # Verify type mappings in the query repr
+        assert "TEXT" in query_repr  # for id, name
+        assert "NUMERIC" in query_repr  # for currency, percent
+        assert "INTEGER" in query_repr  # for int
+        assert "BOOLEAN" in query_repr
+        assert "DATE" in query_repr
+        assert "TIMESTAMP WITH TIME ZONE" in query_repr
+        assert "TIME" in query_repr
+        assert "JSONB" in query_repr  # for location, address
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_with_if_not_exists(self, mock_describe):
+        """Should use IF NOT EXISTS by default."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            db_conn=mock_conn,
+        )
+
+        query_repr = repr(mock_cursor.execute.call_args_list[0][0][0])
+        assert "IF NOT EXISTS" in query_repr
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_without_if_not_exists(self, mock_describe):
+        """Should omit IF NOT EXISTS when if_not_exists=False."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            if_not_exists=False,
+            db_conn=mock_conn,
+        )
+
+        query_repr = repr(mock_cursor.execute.call_args_list[0][0][0])
+        assert "IF NOT EXISTS" not in query_repr
+
+    def test_create_table_empty_fields_raises_error(self):
+        """Should raise ValueError for empty fields list."""
+        mock_conn = MagicMock()
+
+        with pytest.raises(ValueError) as exc_info:
+            create_table_from_describe(
+                table_name="sf_account",
+                sobject_type="Account",
+                fields=[],
+                db_conn=mock_conn,
+            )
+
+        assert "empty" in str(exc_info.value).lower()
+
+    def test_create_table_missing_id_raises_error(self):
+        """Should raise ValueError when Id field is missing."""
+        mock_conn = MagicMock()
+
+        with pytest.raises(ValueError) as exc_info:
+            create_table_from_describe(
+                table_name="sf_account",
+                sobject_type="Account",
+                fields=["Name", "BillingCity"],
+                db_conn=mock_conn,
+            )
+
+        assert "id" in str(exc_info.value).lower()
+        assert "primary key" in str(exc_info.value).lower()
+
+    @patch("sf_utils.db.schema.describe_object")
+    @patch("sf_utils.db.schema.logger")
+    def test_create_table_unknown_field_defaults_to_text(self, mock_logger, mock_describe):
+        """Should default to TEXT for fields not in describe result."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+            # CustomField__c is NOT in describe result
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name", "CustomField__c"],  # CustomField__c not in describe
+            db_conn=mock_conn,
+        )
+
+        # Verify WARNING was logged for unknown field
+        assert mock_logger.warning.called
+        warning_calls = [str(call_obj) for call_obj in mock_logger.warning.call_args_list]
+        assert any("CustomField__c" in call_str for call_str in warning_calls)
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_with_custom_type_mapper(self, mock_describe):
+        """Should use custom type_mapper when provided."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        def custom_mapper(sf_type):
+            if sf_type == "string":
+                return "VARCHAR(500)"
+            return None
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            type_mapper=custom_mapper,
+            db_conn=mock_conn,
+        )
+
+        query_repr = repr(mock_cursor.execute.call_args_list[0][0][0])
+        assert "VARCHAR(500)" in query_repr
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_database_error_rollback(self, mock_describe):
+        """Should rollback transaction on database error."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.execute.side_effect = psycopg2.DatabaseError("table already exists")
+
+        with pytest.raises(psycopg2.DatabaseError):
+            create_table_from_describe(
+                table_name="sf_account",
+                sobject_type="Account",
+                fields=["Id", "Name"],
+                db_conn=mock_conn,
+            )
+
+        mock_conn.rollback.assert_called_once()
+        mock_cursor.close.assert_called_once()
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_returns_false_if_table_existed(self, mock_describe):
+        """Should return False when table already existed."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = [None]  # to_regclass returns NULL
+
+        result = create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            db_conn=mock_conn,
+        )
+
+        assert result is False
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_passes_client_to_describe(self, mock_describe):
+        """Should pass client parameter to describe_object."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        mock_client = MagicMock()
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            client=mock_client,
+            db_conn=mock_conn,
+        )
+
+        mock_describe.assert_called_once_with("Account", client=mock_client)
+
+    @patch("sf_utils.db.schema.describe_object")
+    @patch("sf_utils.db.schema.logger")
+    def test_create_table_logs_type_mapping_at_debug(self, mock_logger, mock_describe):
+        """Should log type mapping decisions at DEBUG level."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+            "Revenue": "currency",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name", "Revenue"],
+            db_conn=mock_conn,
+        )
+
+        # Verify DEBUG logging was called
+        assert mock_logger.debug.called
+        debug_calls = [str(call_obj) for call_obj in mock_logger.debug.call_args_list]
+        # Should log column mappings
+        assert any("Column" in call_str for call_str in debug_calls)
+
+    @patch("sf_utils.db.schema.describe_object")
+    @patch("sf_utils.db.schema.logger")
+    def test_create_table_logs_success_at_info(self, mock_logger, mock_describe):
+        """Should log table creation at INFO level with column count."""
+        mock_describe.return_value = self._mock_describe_result({
+            "Id": "id",
+            "Name": "string",
+            "Revenue": "currency",
+        })
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name", "Revenue"],
+            db_conn=mock_conn,
+        )
+
+        # Verify INFO logging was called
+        assert mock_logger.info.called
+        info_calls = [str(call_obj) for call_obj in mock_logger.info.call_args_list]
+        assert any("sf_account" in call_str for call_str in info_calls)
+        assert any("3" in call_str for call_str in info_calls)  # 3 typed columns
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_create_table_case_insensitive_field_matching(self, mock_describe):
+        """Should match fields case-insensitively against describe result."""
+        # Describe returns lowercase field names
+        mock_describe.return_value = {
+            "name": "Account",
+            "fields": [
+                {"name": "Id", "type": "id"},  # Mixed case in describe
+                {"name": "name", "type": "string"},  # lowercase in describe
+                {"name": "ANNUALREVENUE", "type": "currency"},  # uppercase in describe
+            ]
+        }
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        # Request fields with different casing
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["id", "Name", "AnnualRevenue"],  # Mixed casing
+            db_conn=mock_conn,
+        )
+
+        # Verify execute was called (no error thrown for case mismatch)
+        assert mock_cursor.execute.called
+
+
+class TestCreateTableFromDescribeSQLInjection:
+    """Security tests for create_table_from_describe SQL injection prevention."""
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_sql_injection_in_table_name_blocked(self, mock_describe):
+        """Should prevent SQL injection via table name."""
+        mock_describe.return_value = {
+            "name": "Account",
+            "fields": [{"name": "Id", "type": "id"}, {"name": "Name", "type": "string"}]
+        }
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["malicious_table"]
+
+        # Attempt SQL injection via table name
+        malicious_table = "sf_account; DROP TABLE users; --"
+
+        create_table_from_describe(
+            table_name=malicious_table,
+            sobject_type="Account",
+            fields=["Id", "Name"],
+            db_conn=mock_conn,
+        )
+
+        # Verify execute was called with sql.Composed (safe)
+        create_call = mock_cursor.execute.call_args_list[0]
+        executed_query = create_call[0][0]
+        assert isinstance(executed_query, sql.Composed)
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_sql_injection_in_field_name_blocked(self, mock_describe):
+        """Should prevent SQL injection via field names."""
+        # Field with malicious name in describe result
+        mock_describe.return_value = {
+            "name": "Account",
+            "fields": [
+                {"name": "Id", "type": "id"},
+                {"name": "Name; DROP TABLE users; --", "type": "string"},
+            ]
+        }
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name; DROP TABLE users; --"],
+            db_conn=mock_conn,
+        )
+
+        # Verify execute was called with sql.Composed (safe)
+        create_call = mock_cursor.execute.call_args_list[0]
+        executed_query = create_call[0][0]
+        assert isinstance(executed_query, sql.Composed)
+
+
+class TestCreateTableFromDescribeIntegration:
+    """Integration tests for create_table_from_describe with realistic scenarios."""
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_realistic_account_table_creation(self, mock_describe):
+        """Should create Account table with realistic field types."""
+        mock_describe.return_value = {
+            "name": "Account",
+            "fields": [
+                {"name": "Id", "type": "id"},
+                {"name": "Name", "type": "string"},
+                {"name": "AnnualRevenue", "type": "currency"},
+                {"name": "NumberOfEmployees", "type": "int"},
+                {"name": "IsActive", "type": "boolean"},
+                {"name": "CreatedDate", "type": "datetime"},
+                {"name": "BillingAddress", "type": "address"},
+                {"name": "Website", "type": "url"},
+                {"name": "Industry", "type": "picklist"},
+            ]
+        }
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        result = create_table_from_describe(
+            table_name="sf_account",
+            sobject_type="Account",
+            fields=["Id", "Name", "AnnualRevenue", "NumberOfEmployees",
+                   "IsActive", "CreatedDate", "BillingAddress", "Website", "Industry"],
+            db_conn=mock_conn,
+        )
+
+        assert result is True
+
+        query_repr = repr(mock_cursor.execute.call_args_list[0][0][0])
+
+        # Verify correct type mappings
+        assert "TEXT" in query_repr and "PRIMARY KEY" in query_repr  # Id
+        assert "NUMERIC" in query_repr  # AnnualRevenue (currency)
+        assert "INTEGER" in query_repr  # NumberOfEmployees
+        assert "BOOLEAN" in query_repr  # IsActive
+        assert "TIMESTAMP WITH TIME ZONE" in query_repr  # CreatedDate
+        assert "JSONB" in query_repr  # BillingAddress (address)
+
+    @patch("sf_utils.db.schema.describe_object")
+    def test_existing_create_table_from_query_unchanged(self, mock_describe):
+        """Should not affect existing create_table_from_query function."""
+        # Verify create_table_from_query still works independently
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ["sf_account"]
+
+        soql = "SELECT Id, Name, BillingCity FROM Account"
+        result = create_table_from_query("sf_account", soql, mock_conn)
+
+        assert result is True
+        # describe_object should NOT be called for create_table_from_query
+        mock_describe.assert_not_called()
