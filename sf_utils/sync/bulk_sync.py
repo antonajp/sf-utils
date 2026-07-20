@@ -210,7 +210,7 @@ def create_bulk_query_job(
 def poll_bulk_job(
     job_id: str,
     client: Optional[Salesforce] = None,
-    timeout: float = 600.0,
+    timeout: float = 900.0,
     poll_interval: float = 5.0,
     max_poll_interval: float = 30.0,
     backoff_multiplier: float = 1.5,
@@ -233,7 +233,7 @@ def poll_bulk_job(
     Args:
         job_id: Bulk API 2.0 job ID (e.g., "750xx000000XyzoAAC").
         client: Authenticated Salesforce client. Creates one if not provided.
-        timeout: Maximum time to poll in seconds. Defaults to 600 (10 minutes).
+        timeout: Maximum time to poll in seconds. Defaults to 900 (15 minutes).
             Raises SalesforceAPIError if job doesn't complete within timeout.
         poll_interval: Initial polling interval in seconds. Defaults to 5.
             Increases with exponential backoff on each poll.
@@ -758,7 +758,7 @@ def sync_records_bulk(
     date_field: str = "LastModifiedDate",
     batch_size: int = 1000,
     poll_interval: float = 5.0,
-    timeout: float = 600.0,
+    timeout: float = 900.0,
     client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
 ) -> SyncResult:
@@ -780,7 +780,7 @@ def sync_records_bulk(
         date_field: Date/datetime field for incremental sync. Defaults to 'LastModifiedDate'.
         batch_size: Number of records to process per batch. Defaults to 1000.
         poll_interval: Initial polling interval in seconds. Defaults to 5.0.
-        timeout: Maximum time to poll job in seconds. Defaults to 600.0 (10 minutes).
+        timeout: Maximum time to poll job in seconds. Defaults to 900.0 (15 minutes).
         client: Authenticated Salesforce client. Creates one if not provided.
         db_conn: Active psycopg2 connection. Creates one if not provided.
 
