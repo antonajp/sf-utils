@@ -83,23 +83,37 @@ Required for MFA-enabled orgs and phishing-resistant Connected Apps.
 **Environment Variables:**
 
 ```env
-SF_USERNAME=your-username@example.com
-SF_CLIENT_ID=your-connected-app-client-id
-SF_PRIVATE_KEY_PATH=/path/to/server.key
+# Example: Staging sandbox configuration
+SF_USERNAME=your-username@example.com.stg
+SF_CLIENT_ID=your-connected-app-consumer-key
+SF_PRIVATE_KEY_PATH=/path/to/sf-stg-server.key
 SF_PRIVATE_KEY_PASSPHRASE=your-passphrase   # optional, if key is encrypted
-SF_SANDBOX=false          # true for sandbox orgs
+SF_SANDBOX=true           # true for sandbox orgs
 SF_API_VERSION=v61.0      # optional
 ```
 
 **Step 1: Generate RSA Key Pair**
 
+Most teams work with multiple Salesforce orgs (production + sandboxes). Use a naming convention that identifies each org:
+
+| Org Type | Key File | Certificate File |
+|----------|----------|------------------|
+| Production | `sf-prod-server.key` | `sf-prod-server.crt` |
+| Staging Sandbox | `sf-stg-server.key` | `sf-stg-server.crt` |
+| Dev Sandbox | `sf-dev-server.key` | `sf-dev-server.crt` |
+| UAT Sandbox | `sf-uat-server.key` | `sf-uat-server.crt` |
+
+> **Security**: Each org should have its own key pair. Never share keys across orgs.
+
 Linux / macOS:
 ```bash
-# Generate 2048-bit RSA private key
-openssl genrsa -out server.key 2048
+# Example: Generate keys for Staging sandbox
+openssl genrsa -out sf-stg-server.key 2048
+openssl req -new -x509 -key sf-stg-server.key -out sf-stg-server.crt -days 365 -subj "/CN=sf-utils-stg"
 
-# Generate self-signed X.509 certificate (valid 1 year)
-openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/CN=sf-utils"
+# Example: Generate keys for Production
+openssl genrsa -out sf-prod-server.key 2048
+openssl req -new -x509 -key sf-prod-server.key -out sf-prod-server.crt -days 365 -subj "/CN=sf-utils-prod"
 ```
 
 Windows (use Git Bash, not PowerShell):
@@ -108,24 +122,27 @@ OpenSSL is not included in Windows. The easiest option is to use **Git Bash** wh
 
 1. Install [Git for Windows](https://git-scm.com/download/win) if not already installed
 2. Open **Git Bash** (not PowerShell or Command Prompt)
-3. Run the same commands:
+3. Run the commands (note the `//CN=` double slash to prevent path conversion):
 
 ```bash
-# Generate 2048-bit RSA private key
-openssl genrsa -out server.key 2048
+# Example: Generate keys for Staging sandbox
+openssl genrsa -out sf-stg-server.key 2048
+openssl req -new -x509 -key sf-stg-server.key -out sf-stg-server.crt -days 365 -subj "//CN=sf-utils-stg"
 
-# Generate self-signed X.509 certificate (valid 1 year)
-# Note: Use double slashes //CN= to prevent Git Bash path conversion
-openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "//CN=sf-utils"
+# Example: Generate keys for Production
+openssl genrsa -out sf-prod-server.key 2048
+openssl req -new -x509 -key sf-prod-server.key -out sf-prod-server.crt -days 365 -subj "//CN=sf-utils-prod"
 ```
 
-> **Tip**: Store your key in a persistent location like `C:\Users\YourName\.ssh\server.key` and reference that path in `SF_PRIVATE_KEY_PATH`.
+> **Tip**: Store keys in `~/.ssh/salesforce/` (Linux/macOS) or `C:\Users\YourName\.ssh\salesforce\` (Windows) to keep them organized and secure.
 
 **Step 2: Create Connected App in Salesforce**
 
+Repeat this step for each org (production and each sandbox). Use the corresponding certificate for each org.
+
 1. **Setup** → **Apps** → **App Manager** → **New Connected App**
 2. Fill in basic info:
-   - Connected App Name: `sf-utils` (or your choice)
+   - Connected App Name: `sf-utils-stg` (include org identifier: `-prod`, `-stg`, `-dev`, etc.)
    - API Name: auto-generated
    - Contact Email: your email
 3. **Enable OAuth Settings**:
@@ -158,15 +175,42 @@ openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "//CN=sf-
 
 **Step 5: Configure Environment**
 
-1. Store your private key securely (never commit to git!)
-2. Set environment variables:
+1. Store your private keys securely (never commit to git!)
+2. Create separate `.env` files for each org:
+
+```
+project/
+├── .env              # Symlink or copy of active environment
+├── .env.prod         # Production org
+├── .env.stg          # Staging sandbox
+├── .env.dev          # Dev sandbox
+└── .gitignore        # Must include .env*
+```
+
+Example `.env.stg` (Staging sandbox):
+```env
+SF_USERNAME=your-username@example.com.stg
+SF_CLIENT_ID=your-stg-consumer-key
+SF_PRIVATE_KEY_PATH=/path/to/sf-stg-server.key
+SF_SANDBOX=true
+```
+
+Example `.env.prod` (Production):
+```env
+SF_USERNAME=your-username@example.com
+SF_CLIENT_ID=your-prod-consumer-key
+SF_PRIVATE_KEY_PATH=/path/to/sf-prod-server.key
+SF_SANDBOX=false
+```
+
+3. Switch environments by copying or symlinking:
    ```bash
-   export SF_USERNAME=your-username@example.com
-   export SF_CLIENT_ID=your-consumer-key
-   export SF_PRIVATE_KEY_PATH=/path/to/server.key
-   export SF_SANDBOX=false
+   # Linux/macOS
+   cp .env.stg .env    # or: ln -sf .env.stg .env
+
+   # Windows PowerShell
+   Copy-Item .env.stg .env
    ```
-3. Or add to `.env` file (already gitignored)
 
 **Verify JWT Setup:**
 
