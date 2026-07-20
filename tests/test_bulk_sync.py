@@ -7,7 +7,7 @@ import pytest
 
 from sf_utils.exceptions import SalesforceAPIError, SalesforceAuthError, SalesforceRateLimitError
 from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG, NO_RETRY_CONFIG
-from sf_utils.sync.bulk_sync import create_bulk_query_job
+from sf_utils.sync.bulk_sync import create_bulk_query_job, poll_bulk_job
 
 
 @pytest.fixture(autouse=True)
@@ -687,3 +687,627 @@ class TestCreateBulkQueryJobHeaders:
         headers = mock_post.call_args[1]['headers']
         assert headers['Content-Type'] == 'application/json'
         assert headers['Accept'] == 'application/json'
+
+
+# ============================================================================
+# Poll Bulk Job Tests
+# ============================================================================
+
+
+class TestPollBulkJobSuccess:
+    """Tests for successful job polling scenarios."""
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_immediate_complete(self, mock_get, mock_sleep, mock_client):
+        """Should return immediately if job is already JobComplete."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "JobComplete",
+            "object": "Account",
+            "numberOfRecordsProcessed": 1000,
+            "retries": 0,
+            "totalProcessingTime": 5000
+        }
+        mock_get.return_value = mock_response
+
+        result = poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            timeout=60.0,
+            poll_interval=5.0
+        )
+
+        # Should return job metadata
+        assert result["id"] == "750xx0000004567AAA"
+        assert result["state"] == "JobComplete"
+        assert result["numberOfRecordsProcessed"] == 1000
+
+        # Should only poll once (already complete)
+        assert mock_get.call_count == 1
+        # Should not sleep (already complete)
+        assert mock_sleep.call_count == 0
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_in_progress_then_complete(self, mock_get, mock_sleep, mock_client):
+        """Should poll until job transitions to JobComplete."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                # First call: InProgress
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "InProgress",
+                    "numberOfRecordsProcessed": 0
+                }
+            elif call_count == 2:
+                # Second call: still InProgress
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "InProgress",
+                    "numberOfRecordsProcessed": 500
+                }
+            else:
+                # Third call: JobComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "JobComplete",
+                    "numberOfRecordsProcessed": 1000
+                }
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        result = poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            timeout=60.0,
+            poll_interval=2.0
+        )
+
+        # Should eventually return complete job
+        assert result["state"] == "JobComplete"
+        assert result["numberOfRecordsProcessed"] == 1000
+
+        # Should poll 3 times total
+        assert call_count == 3
+        # Should sleep 2 times (between polls)
+        assert mock_sleep.call_count == 2
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_returns_full_metadata(self, mock_get, mock_sleep, mock_client):
+        """Should return complete job metadata including all fields."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "JobComplete",
+            "object": "Account",
+            "operation": "query",
+            "numberOfRecordsProcessed": 5000,
+            "retries": 0,
+            "totalProcessingTime": 12000,
+            "apiVersion": 61.0,
+            "concurrencyMode": "Parallel",
+            "contentType": "CSV",
+            "createdById": "005xx000001X8UzAAK",
+            "createdDate": "2024-07-19T12:00:00.000+0000",
+            "systemModstamp": "2024-07-19T12:00:05.000+0000"
+        }
+        mock_get.return_value = mock_response
+
+        result = poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client
+        )
+
+        # Verify all metadata fields present
+        assert result["id"] == "750xx0000004567AAA"
+        assert result["state"] == "JobComplete"
+        assert result["object"] == "Account"
+        assert result["numberOfRecordsProcessed"] == 5000
+        assert result["retries"] == 0
+        assert result["totalProcessingTime"] == 12000
+        assert result["apiVersion"] == 61.0
+
+
+class TestPollBulkJobStatusHandling:
+    """Tests for different job status transitions."""
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_handles_upload_complete_status(self, mock_get, mock_sleep, mock_client):
+        """Should continue polling when status is UploadComplete."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                # First call: UploadComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "UploadComplete",
+                    "numberOfRecordsProcessed": 0
+                }
+            else:
+                # Second call: JobComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "JobComplete",
+                    "numberOfRecordsProcessed": 1000
+                }
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        result = poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            poll_interval=1.0
+        )
+
+        # Should eventually complete
+        assert result["state"] == "JobComplete"
+        assert call_count == 2
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_handles_in_progress_status(self, mock_get, mock_sleep, mock_client):
+        """Should continue polling when status is InProgress."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count <= 3:
+                # First 3 calls: InProgress
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "InProgress",
+                    "numberOfRecordsProcessed": call_count * 100
+                }
+            else:
+                # Final call: JobComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "JobComplete",
+                    "numberOfRecordsProcessed": 1000
+                }
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        result = poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            poll_interval=1.0
+        )
+
+        # Should poll until complete
+        assert result["state"] == "JobComplete"
+        assert call_count == 4
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_handles_job_complete_status(self, mock_get, mock_sleep, mock_client):
+        """Should return immediately when status is JobComplete."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "JobComplete",
+            "numberOfRecordsProcessed": 1000
+        }
+        mock_get.return_value = mock_response
+
+        result = poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client
+        )
+
+        # Should return immediately
+        assert result["state"] == "JobComplete"
+        assert mock_get.call_count == 1
+        assert mock_sleep.call_count == 0
+
+
+class TestPollBulkJobErrors:
+    """Tests for error handling during polling."""
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_failed_raises_api_error(self, mock_get, mock_client):
+        """Should raise SalesforceAPIError when job state is Failed."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "Failed",
+            "errorMessage": "Query execution failed"
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            poll_bulk_job(
+                job_id="750xx0000004567AAA",
+                client=mock_client
+            )
+
+        assert exc_info.value.status_code == 200
+        assert "Failed" in str(exc_info.value)
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_aborted_raises_api_error(self, mock_get, mock_client):
+        """Should raise SalesforceAPIError when job state is Aborted."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "Aborted",
+            "errorMessage": "Job aborted by user"
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            poll_bulk_job(
+                job_id="750xx0000004567AAA",
+                client=mock_client
+            )
+
+        assert "Aborted" in str(exc_info.value)
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.time.monotonic')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_timeout_raises_error(self, mock_get, mock_monotonic, mock_sleep, mock_client):
+        """Should raise SalesforceAPIError when timeout is exceeded."""
+        # Simulate time passing
+        start_time = 1000.0
+        mock_monotonic.side_effect = [
+            start_time,      # Initial time
+            start_time + 10, # After first poll
+            start_time + 20, # After second poll
+            start_time + 35, # After third poll (exceeds 30s timeout)
+        ]
+
+        # Job stays in InProgress
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "InProgress",
+            "numberOfRecordsProcessed": 0
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            poll_bulk_job(
+                job_id="750xx0000004567AAA",
+                client=mock_client,
+                timeout=30.0,
+                poll_interval=5.0
+            )
+
+        # Verify timeout error message
+        error_message = str(exc_info.value).lower()
+        assert "did not complete within" in error_message or "timeout" in error_message
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_api_error_during_poll(self, mock_get, mock_sleep, mock_client):
+        """Should raise SalesforceAPIError on HTTP error during polling."""
+        mock_response = Mock()
+        mock_response.status_code = 500
+        mock_response.json.return_value = {
+            "message": "Internal server error"
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            poll_bulk_job(
+                job_id="750xx0000004567AAA",
+                client=mock_client
+            )
+
+        assert exc_info.value.status_code == 500
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_auth_error_401(self, mock_get, mock_client):
+        """Should raise SalesforceAuthError on 401 response."""
+        mock_response = Mock()
+        mock_response.status_code = 401
+        mock_response.json.return_value = {
+            "errorCode": "INVALID_SESSION_ID",
+            "message": "Session expired"
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(SalesforceAuthError) as exc_info:
+            poll_bulk_job(
+                job_id="750xx0000004567AAA",
+                client=mock_client
+            )
+
+        assert exc_info.value.status_code == 401
+
+
+class TestPollBulkJobBackoff:
+    """Tests for exponential backoff behavior."""
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_uses_exponential_backoff(self, mock_get, mock_sleep, mock_client):
+        """Should increase sleep interval exponentially with backoff multiplier."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count <= 3:
+                # First 3 calls: InProgress
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "InProgress",
+                    "numberOfRecordsProcessed": 0
+                }
+            else:
+                # Final call: JobComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "JobComplete",
+                    "numberOfRecordsProcessed": 1000
+                }
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            poll_interval=2.0,
+            max_poll_interval=20.0,
+            backoff_multiplier=2.0
+        )
+
+        # Verify sleep calls use exponential backoff
+        assert mock_sleep.call_count == 3
+        sleep_calls = [call[0][0] for call in mock_sleep.call_args_list]
+
+        # First sleep: 2.0
+        # Second sleep: 2.0 * 2.0 = 4.0
+        # Third sleep: 4.0 * 2.0 = 8.0
+        assert sleep_calls[0] == 2.0
+        assert sleep_calls[1] == 4.0
+        assert sleep_calls[2] == 8.0
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_respects_max_interval(self, mock_get, mock_sleep, mock_client):
+        """Should cap sleep interval at max_poll_interval."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count <= 5:
+                # First 5 calls: InProgress
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "InProgress",
+                    "numberOfRecordsProcessed": 0
+                }
+            else:
+                # Final call: JobComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "JobComplete",
+                    "numberOfRecordsProcessed": 1000
+                }
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            poll_interval=5.0,
+            max_poll_interval=10.0,
+            backoff_multiplier=2.0
+        )
+
+        # Verify sleep intervals are capped
+        sleep_calls = [call[0][0] for call in mock_sleep.call_args_list]
+
+        # First sleep: 5.0
+        # Second sleep: 10.0 (capped from 5.0 * 2.0)
+        # Third sleep: 10.0 (capped)
+        # Fourth sleep: 10.0 (capped)
+        # Fifth sleep: 10.0 (capped)
+        assert sleep_calls[0] == 5.0
+        assert all(interval == 10.0 for interval in sleep_calls[1:])
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_respects_initial_interval(self, mock_get, mock_sleep, mock_client):
+        """Should start with poll_interval on first sleep."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                # First call: InProgress
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "InProgress",
+                    "numberOfRecordsProcessed": 0
+                }
+            else:
+                # Second call: JobComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "JobComplete",
+                    "numberOfRecordsProcessed": 1000
+                }
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            poll_interval=3.0
+        )
+
+        # Verify first sleep uses poll_interval
+        assert mock_sleep.call_count == 1
+        assert mock_sleep.call_args[0][0] == 3.0
+
+
+class TestPollBulkJobConfig:
+    """Tests for configuration parameter handling."""
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.time.monotonic')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_custom_timeout(self, mock_get, mock_monotonic, mock_sleep, mock_client):
+        """Should honor custom timeout parameter."""
+        # Simulate time passing beyond custom timeout
+        start_time = 1000.0
+        mock_monotonic.side_effect = [
+            start_time,      # Initial time
+            start_time + 15, # After first poll (exceeds 10s timeout)
+        ]
+
+        # Job stays in InProgress
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "InProgress",
+            "numberOfRecordsProcessed": 0
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            poll_bulk_job(
+                job_id="750xx0000004567AAA",
+                client=mock_client,
+                timeout=10.0  # Custom short timeout
+            )
+
+        # Verify timeout error message
+        error_message = str(exc_info.value).lower()
+        assert "did not complete within" in error_message or "timeout" in error_message
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_poll_custom_interval(self, mock_get, mock_sleep, mock_client):
+        """Should honor custom poll_interval parameter."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                # First call: InProgress
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "InProgress",
+                    "numberOfRecordsProcessed": 0
+                }
+            else:
+                # Second call: JobComplete
+                mock_response.json.return_value = {
+                    "id": "750xx0000004567AAA",
+                    "state": "JobComplete",
+                    "numberOfRecordsProcessed": 1000
+                }
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        poll_bulk_job(
+            job_id="750xx0000004567AAA",
+            client=mock_client,
+            poll_interval=7.0  # Custom interval
+        )
+
+        # Verify custom interval used
+        assert mock_sleep.call_count == 1
+        assert mock_sleep.call_args[0][0] == 7.0
+
+    @patch('sf_utils.sync.bulk_sync.time.sleep')
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_poll_creates_client_if_none(self, mock_get_client, mock_get, mock_sleep):
+        """Should create client from environment if not provided."""
+        # Create mock client
+        mock_client = Mock()
+        mock_client.instance_url = "example.my.salesforce.com"
+        mock_client.client_api_version = "v61.0"
+        mock_client.session_id = "00Dxx0000001234!ABC"
+        mock_client.proxies = None
+
+        mock_get_client.return_value = mock_client
+
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "JobComplete",
+            "numberOfRecordsProcessed": 1000
+        }
+        mock_get.return_value = mock_response
+
+        result = poll_bulk_job(
+            job_id="750xx0000004567AAA"
+            # client=None (implicit)
+        )
+
+        # Verify get_client was called
+        mock_get_client.assert_called_once()
+        assert result["state"] == "JobComplete"
