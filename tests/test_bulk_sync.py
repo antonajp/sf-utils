@@ -21,10 +21,11 @@ def reset_circuit_breaker():
 
 @pytest.fixture
 def mock_client():
-    """Create a mock Salesforce client."""
+    """Create a mock Salesforce client (simple-salesforce API)."""
     client = Mock()
-    client.instance_url = "example.my.salesforce.com"
-    client.client_api_version = "v61.0"
+    # simple-salesforce uses sf_instance and sf_version (without 'v' prefix)
+    client.sf_instance = "example.my.salesforce.com"
+    client.sf_version = "61.0"  # simple-salesforce stores version without 'v' prefix
     client.session_id = "00Dxx0000001234!ABCdefghijklmnopQRSTuvwxyz"
     client.proxies = None
 
@@ -289,8 +290,8 @@ class TestCreateBulkQueryJobClientHandling:
         """Client should be created from env if not provided."""
         # Create mock client
         mock_client = Mock()
-        mock_client.instance_url = "example.my.salesforce.com"
-        mock_client.client_api_version = "v61.0"
+        mock_client.sf_instance = "example.my.salesforce.com"
+        mock_client.sf_version = "61.0"
         mock_client.session_id = "00Dxx0000001234!ABC"
         mock_client.proxies = None
 
@@ -318,8 +319,8 @@ class TestCreateBulkQueryJobClientHandling:
         """Provided client should be used instead of creating new one."""
         # Create custom client
         custom_client = Mock()
-        custom_client.instance_url = "custom.my.salesforce.com"
-        custom_client.client_api_version = "v60.0"
+        custom_client.sf_instance = "custom.my.salesforce.com"
+        custom_client.sf_version = "v60.0"
         custom_client.session_id = "00Dxx0000001234!ABC"
         custom_client.proxies = None
 
@@ -556,8 +557,8 @@ class TestCreateBulkQueryJobEdgeCases:
     @patch('sf_utils.sync.bulk_sync.requests.post')
     def test_different_api_versions(self, mock_post, mock_client):
         """Should use API version from client."""
-        # Test with different version
-        mock_client.client_api_version = "v60.0"
+        # Test with different version (simple-salesforce stores without 'v' prefix)
+        mock_client.sf_version = "60.0"
 
         mock_response = Mock()
         mock_response.status_code = 201
@@ -575,10 +576,10 @@ class TestCreateBulkQueryJobEdgeCases:
         assert "/services/data/v60.0/jobs/query" in actual_url
 
     @patch('sf_utils.sync.bulk_sync.requests.post')
-    def test_sandbox_instance_url(self, mock_post, mock_client):
+    def test_sandbox_sf_instance(self, mock_post, mock_client):
         """Should work with sandbox instance URLs."""
         # Sandbox URL
-        mock_client.instance_url = "example--sandbox.my.salesforce.com"
+        mock_client.sf_instance = "example--sandbox.my.salesforce.com"
 
         mock_response = Mock()
         mock_response.status_code = 201
@@ -1287,8 +1288,8 @@ class TestPollBulkJobConfig:
         """Should create client from environment if not provided."""
         # Create mock client
         mock_client = Mock()
-        mock_client.instance_url = "example.my.salesforce.com"
-        mock_client.client_api_version = "v61.0"
+        mock_client.sf_instance = "example.my.salesforce.com"
+        mock_client.sf_version = "61.0"
         mock_client.session_id = "00Dxx0000001234!ABC"
         mock_client.proxies = None
 
@@ -2043,8 +2044,8 @@ class TestGetBulkResultsConfig:
         """Should create client from environment if not provided."""
         # Create mock client
         mock_client = Mock()
-        mock_client.instance_url = "example.my.salesforce.com"
-        mock_client.client_api_version = "v61.0"
+        mock_client.sf_instance = "example.my.salesforce.com"
+        mock_client.sf_version = "61.0"
         mock_client.session_id = "00Dxx0000001234!ABC"
         mock_client.proxies = None
 

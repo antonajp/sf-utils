@@ -1,6 +1,6 @@
 # Salesforce Utilities
 
-Python utility functions for Salesforce operations using the [SalesforcePy](https://github.com/forcedotcom/SalesforcePy) library.
+Python utility functions for Salesforce operations using the [simple-salesforce](https://github.com/simple-salesforce/simple-salesforce) library with JWT Bearer OAuth support.
 
 ## Jira Project
 All tickets for this project use the **DEV** project in Jira.
@@ -99,7 +99,8 @@ sf-sprint-runner         # Batch: orchestrates multiple tickets with CI/merge
 
 ### Tech Stack
 - **Language**: Python 3.9+
-- **Salesforce**: SalesforcePy 2.2+
+- **Salesforce**: simple-salesforce 1.12+ (JWT Bearer OAuth & password flow)
+- **JWT Auth**: PyJWT 2.8+, cryptography 41.0+
 - **Database**: PostgreSQL (Docker container, psycopg2)
 - **Export**: openpyxl (Excel), csv (stdlib)
 - **Config**: python-dotenv
@@ -141,13 +142,20 @@ tests/
 
 ### Environment Variables
 ```
-# Salesforce
+# Salesforce (Password Flow)
 SF_USERNAME=user@example.com
 SF_PASSWORD=password
 SF_CLIENT_ID=connected-app-client-id
 SF_CLIENT_SECRET=connected-app-secret
 SF_SANDBOX=false          # true for sandbox orgs
 SF_API_VERSION=v61.0      # optional
+
+# Salesforce (JWT Bearer Flow - for MFA-enabled orgs)
+SF_USERNAME=user@example.com
+SF_CLIENT_ID=connected-app-client-id
+SF_PRIVATE_KEY_PATH=/path/to/server.key
+SF_PRIVATE_KEY_PASSPHRASE=optional-passphrase  # if key is encrypted
+SF_SANDBOX=false
 
 # PostgreSQL (Docker container)
 PG_HOST=localhost
@@ -180,7 +188,8 @@ PG_PASSWORD=your-password
 
 ### Key Design Decisions
 - All functions accept optional `client` parameter; creates one from env if not provided
-- SalesforcePy returns `(body, status)` tuples; utilities handle this consistently
+- Auto-detects JWT vs password auth based on `SF_PRIVATE_KEY_PATH` environment variable
+- simple-salesforce raises exceptions on errors; utilities wrap these in typed exceptions
 - Sandbox vs production determined by `SF_SANDBOX` env var (uses test.salesforce.com)
 - Pagination handled automatically in `query_all()`
 - PostgreSQL is loosely coupled - each clone has its own Docker container

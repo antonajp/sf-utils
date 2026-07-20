@@ -3,20 +3,74 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from SalesforcePy.sfdc import Client
+from simple_salesforce import Salesforce
+from simple_salesforce.exceptions import SalesforceError as SimpleSalesforceError
 
 from sf_utils.client import get_client
-from sf_utils.exceptions import SalesforceAPIError
-from sf_utils.retry import raise_for_status, RetryConfig, DEFAULT_RETRY_CONFIG, with_retry
+from sf_utils.exceptions import SalesforceAPIError, SalesforceAuthError, SalesforceRateLimitError
+from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG, with_retry
 
 logger = logging.getLogger(__name__)
+
+
+def _handle_salesforce_exception(e: SimpleSalesforceError, context: str) -> None:
+    """Convert simple-salesforce exceptions to sf_utils exceptions.
+
+    Args:
+        e: Exception from simple-salesforce.
+        context: Context string for error message.
+
+    Raises:
+        SalesforceAuthError: For authentication/authorization failures.
+        SalesforceRateLimitError: For rate limit errors.
+        SalesforceAPIError: For other API errors.
+    """
+    error_str = str(e)
+    status_code = getattr(e, 'status', None)
+
+    # Check for authentication errors
+    if status_code in (401, 403) or "INVALID_SESSION_ID" in error_str:
+        logger.error("Authentication error during %s: %s", context, error_str)
+        raise SalesforceAuthError(
+            message=error_str,
+            status_code=status_code
+        ) from e
+
+    # Check for rate limit errors
+    if status_code == 429 or "REQUEST_LIMIT_EXCEEDED" in error_str:
+        retry_after = None
+        api_usage = None
+        if hasattr(e, 'headers'):
+            headers = e.headers or {}
+            if 'Retry-After' in headers:
+                try:
+                    retry_after = int(headers['Retry-After'])
+                except (ValueError, TypeError):
+                    pass
+            if 'Sforce-Limit-Info' in headers:
+                api_usage = headers['Sforce-Limit-Info']
+
+        logger.warning("Rate limit exceeded during %s: %s", context, error_str)
+        raise SalesforceRateLimitError(
+            message=error_str,
+            status_code=status_code or 429,
+            retry_after=retry_after,
+            api_usage=api_usage
+        ) from e
+
+    # Generic API error
+    logger.error("API error during %s: %s", context, error_str)
+    raise SalesforceAPIError(
+        message=error_str,
+        status_code=status_code or 500
+    ) from e
 
 
 def get_record(
     sobject_type: str,
     record_id: str,
     fields: Optional[List[str]] = None,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> Dict[str, Any]:
     """Retrieve a single record by ID.
@@ -46,27 +100,26 @@ def get_record(
     def _get_record_impl():
         logger.debug("Getting %s record: %s", sobject_type, record_id)
 
-        sobjects = client.sobjects(sobject_type, record_id=record_id)
+        try:
+            # Get SObject handler from client
+            sobject = getattr(client, sobject_type)
 
-        params = {}
-        if fields:
-            params["fields"] = ",".join(fields)
+            # simple-salesforce get() accepts record_id and optional fields
+            if fields:
+                result = sobject.get(record_id, fields=fields)
+            else:
+                result = sobject.get(record_id)
 
-        response = sobjects.query(**params) if params else sobjects.query()
+            if result is None:
+                raise SalesforceAPIError(
+                    message=f"Failed to retrieve {sobject_type} record {record_id}",
+                    status_code=500
+                )
 
-        if response is None:
-            raise SalesforceAPIError(
-                message=f"Failed to retrieve {sobject_type} record {record_id}",
-                status_code=500
-            )
+            return result
 
-        body, status = response if isinstance(response, tuple) else (response, 200)
-
-        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-        # Rate limit detection works via error code parsing (REQUEST_LIMIT_EXCEEDED) instead.
-        raise_for_status(body, status, headers=None)
-
-        return body
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, f"get_record({sobject_type})")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:
@@ -84,7 +137,7 @@ def get_record(
 def create_record(
     sobject_type: str,
     data: Dict[str, Any],
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> str:
     """Create a new record.
@@ -113,24 +166,34 @@ def create_record(
     def _create_record_impl():
         logger.debug("Creating %s record with data: %s", sobject_type, list(data.keys()))
 
-        sobjects = client.sobjects(sobject_type)
-        response = sobjects.insert(data)
+        try:
+            # Get SObject handler from client
+            sobject = getattr(client, sobject_type)
 
-        if response is None:
-            raise SalesforceAPIError(
-                message=f"Failed to create {sobject_type} record",
-                status_code=500
-            )
+            # simple-salesforce create() returns {'id': '...', 'success': True, 'errors': []}
+            result = sobject.create(data)
 
-        body, status = response if isinstance(response, tuple) else (response, 201)
+            if result is None:
+                raise SalesforceAPIError(
+                    message=f"Failed to create {sobject_type} record",
+                    status_code=500
+                )
 
-        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-        raise_for_status(body, status, headers=None)
+            if not result.get("success"):
+                errors = result.get("errors", [])
+                error_msg = "; ".join(str(e) for e in errors) if errors else "Unknown error"
+                raise SalesforceAPIError(
+                    message=f"Failed to create {sobject_type} record: {error_msg}",
+                    status_code=400
+                )
 
-        record_id = body.get("id")
-        logger.debug("Created %s record: %s", sobject_type, record_id)
+            record_id = result.get("id")
+            logger.debug("Created %s record: %s", sobject_type, record_id)
 
-        return record_id
+            return record_id
+
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, f"create_record({sobject_type})")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:
@@ -149,7 +212,7 @@ def update_record(
     sobject_type: str,
     record_id: str,
     data: Dict[str, Any],
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> bool:
     """Update an existing record.
@@ -179,22 +242,25 @@ def update_record(
     def _update_record_impl():
         logger.debug("Updating %s record %s with: %s", sobject_type, record_id, list(data.keys()))
 
-        sobjects = client.sobjects(sobject_type, record_id=record_id)
-        response = sobjects.update(data)
+        try:
+            # Get SObject handler from client
+            sobject = getattr(client, sobject_type)
 
-        if response is None:
-            raise SalesforceAPIError(
-                message=f"Failed to update {sobject_type} record {record_id}",
-                status_code=500
-            )
+            # simple-salesforce update() returns HTTP status code (204 for success)
+            result = sobject.update(record_id, data)
 
-        body, status = response if isinstance(response, tuple) else (response, 204)
+            # Result is the HTTP status code (204 = No Content = Success)
+            if result is None or result >= 400:
+                raise SalesforceAPIError(
+                    message=f"Failed to update {sobject_type} record {record_id}",
+                    status_code=result or 500
+                )
 
-        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-        raise_for_status(body, status, headers=None)
+            logger.debug("Updated %s record: %s", sobject_type, record_id)
+            return True
 
-        logger.debug("Updated %s record: %s", sobject_type, record_id)
-        return True
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, f"update_record({sobject_type})")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:
@@ -214,7 +280,7 @@ def upsert_record(
     external_id_field: str,
     external_id_value: str,
     data: Dict[str, Any],
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> Dict[str, Any]:
     """Upsert a record using an external ID field.
@@ -250,32 +316,55 @@ def upsert_record(
             external_id_value
         )
 
-        sobjects = client.sobjects(
-            sobject_type,
-            external_id_field=external_id_field,
-            record_id=external_id_value,
-        )
-        response = sobjects.upsert(data)
+        try:
+            # Get SObject handler from client
+            sobject = getattr(client, sobject_type)
 
-        if response is None:
-            raise SalesforceAPIError(
-                message=f"Failed to upsert {sobject_type} record",
-                status_code=500
+            # simple-salesforce upsert() returns:
+            # - Created: {'id': '...', 'success': True, 'created': True, 'errors': []}
+            # - Updated: {'id': '...', 'success': True, 'created': False, 'errors': []}
+            # Or HTTP status code on some versions
+            result = sobject.upsert(
+                f"{external_id_field}/{external_id_value}",
+                data
             )
 
-        body, status = response if isinstance(response, tuple) else (response, 200)
+            # Handle both dict response and HTTP status code
+            if isinstance(result, int):
+                # HTTP status code response (201 = created, 204 = updated)
+                created = result == 201
+                # For status code response, we need to fetch the record to get ID
+                # This is a fallback; normally simple-salesforce returns a dict
+                record_id = None
+            else:
+                # Dict response
+                if result is None:
+                    raise SalesforceAPIError(
+                        message=f"Failed to upsert {sobject_type} record",
+                        status_code=500
+                    )
 
-        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-        raise_for_status(body, status, headers=None)
+                if not result.get("success", True):
+                    errors = result.get("errors", [])
+                    error_msg = "; ".join(str(e) for e in errors) if errors else "Unknown error"
+                    raise SalesforceAPIError(
+                        message=f"Failed to upsert {sobject_type} record: {error_msg}",
+                        status_code=400
+                    )
 
-        created = status == 201
-        result = {
-            "id": body.get("id"),
-            "created": created,
-        }
+                record_id = result.get("id")
+                created = result.get("created", False)
 
-        logger.debug("Upserted %s record: %s (created=%s)", sobject_type, result["id"], created)
-        return result
+            response = {
+                "id": record_id,
+                "created": created,
+            }
+
+            logger.debug("Upserted %s record: %s (created=%s)", sobject_type, record_id, created)
+            return response
+
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, f"upsert_record({sobject_type})")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:
@@ -293,7 +382,7 @@ def upsert_record(
 def delete_record(
     sobject_type: str,
     record_id: str,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> bool:
     """Delete a record.
@@ -322,22 +411,25 @@ def delete_record(
     def _delete_record_impl():
         logger.debug("Deleting %s record: %s", sobject_type, record_id)
 
-        sobjects = client.sobjects(sobject_type, record_id=record_id)
-        response = sobjects.delete()
+        try:
+            # Get SObject handler from client
+            sobject = getattr(client, sobject_type)
 
-        if response is None:
-            raise SalesforceAPIError(
-                message=f"Failed to delete {sobject_type} record {record_id}",
-                status_code=500
-            )
+            # simple-salesforce delete() returns HTTP status code (204 for success)
+            result = sobject.delete(record_id)
 
-        body, status = response if isinstance(response, tuple) else (response, 204)
+            # Result is the HTTP status code (204 = No Content = Success)
+            if result is None or result >= 400:
+                raise SalesforceAPIError(
+                    message=f"Failed to delete {sobject_type} record {record_id}",
+                    status_code=result or 500
+                )
 
-        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-        raise_for_status(body, status, headers=None)
+            logger.debug("Deleted %s record: %s", sobject_type, record_id)
+            return True
 
-        logger.debug("Deleted %s record: %s", sobject_type, record_id)
-        return True
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, f"delete_record({sobject_type})")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:
@@ -354,7 +446,7 @@ def delete_record(
 
 def describe_object(
     sobject_type: str,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> Dict[str, Any]:
     """Get metadata description of an SObject type.
@@ -382,21 +474,23 @@ def describe_object(
     def _describe_object_impl():
         logger.debug("Describing %s", sobject_type)
 
-        sobjects = client.sobjects(sobject_type)
-        response = sobjects.describe()
+        try:
+            # Get SObject handler from client
+            sobject = getattr(client, sobject_type)
 
-        if response is None:
-            raise SalesforceAPIError(
-                message=f"Failed to describe {sobject_type}",
-                status_code=500
-            )
+            # simple-salesforce describe() returns describe metadata dict
+            result = sobject.describe()
 
-        body, status = response if isinstance(response, tuple) else (response, 200)
+            if result is None:
+                raise SalesforceAPIError(
+                    message=f"Failed to describe {sobject_type}",
+                    status_code=500
+                )
 
-        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-        raise_for_status(body, status, headers=None)
+            return result
 
-        return body
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, f"describe_object({sobject_type})")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:

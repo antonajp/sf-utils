@@ -3,18 +3,73 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from SalesforcePy.sfdc import Client
+from simple_salesforce import Salesforce
+from simple_salesforce.exceptions import SalesforceError as SimpleSalesforceError
 
 from sf_utils.client import get_client
-from sf_utils.exceptions import SalesforceAPIError
-from sf_utils.retry import raise_for_status, RetryConfig, DEFAULT_RETRY_CONFIG, with_retry
+from sf_utils.exceptions import SalesforceAPIError, SalesforceAuthError, SalesforceRateLimitError
+from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG, with_retry
 
 logger = logging.getLogger(__name__)
 
 
+def _handle_salesforce_exception(e: SimpleSalesforceError, context: str = "query") -> None:
+    """Convert simple-salesforce exceptions to sf_utils exceptions.
+
+    Args:
+        e: Exception from simple-salesforce.
+        context: Context string for error message.
+
+    Raises:
+        SalesforceAuthError: For authentication/authorization failures.
+        SalesforceRateLimitError: For rate limit errors.
+        SalesforceAPIError: For other API errors.
+    """
+    error_str = str(e)
+    status_code = getattr(e, 'status', None)
+
+    # Check for authentication errors
+    if status_code in (401, 403) or "INVALID_SESSION_ID" in error_str:
+        logger.error("Authentication error during %s: %s", context, error_str)
+        raise SalesforceAuthError(
+            message=error_str,
+            status_code=status_code
+        ) from e
+
+    # Check for rate limit errors
+    if status_code == 429 or "REQUEST_LIMIT_EXCEEDED" in error_str:
+        # Extract retry_after from exception if available
+        retry_after = None
+        api_usage = None
+        if hasattr(e, 'headers'):
+            headers = e.headers or {}
+            if 'Retry-After' in headers:
+                try:
+                    retry_after = int(headers['Retry-After'])
+                except (ValueError, TypeError):
+                    pass
+            if 'Sforce-Limit-Info' in headers:
+                api_usage = headers['Sforce-Limit-Info']
+
+        logger.warning("Rate limit exceeded during %s: %s", context, error_str)
+        raise SalesforceRateLimitError(
+            message=error_str,
+            status_code=status_code or 429,
+            retry_after=retry_after,
+            api_usage=api_usage
+        ) from e
+
+    # Generic API error
+    logger.error("API error during %s: %s", context, error_str)
+    raise SalesforceAPIError(
+        message=error_str,
+        status_code=status_code or 500
+    ) from e
+
+
 def query(
     soql: str,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> List[Dict[str, Any]]:
     """Execute a SOQL query and return the first batch of results.
@@ -55,27 +110,24 @@ def query(
     def _query_impl():
         logger.debug("Executing SOQL query: %s", soql[:100])
 
-        response = client.query(soql)
+        try:
+            # simple-salesforce returns dict directly, not (body, status) tuple
+            result = client.query(soql)
 
-        if response is None:
-            logger.error("Query returned None")
-            raise SalesforceAPIError(
-                message="Query failed - no response from Salesforce",
-                status_code=500
-            )
+            if result is None:
+                logger.error("Query returned None")
+                raise SalesforceAPIError(
+                    message="Query failed - no response from Salesforce",
+                    status_code=500
+                )
 
-        # SalesforcePy returns tuple (response_body, status_code)
-        body, status = response if isinstance(response, tuple) else (response, 200)
+            records = result.get("records", [])
+            logger.debug("Query returned %d records", len(records))
 
-        # Raises typed exceptions for error status codes
-        # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-        # Rate limit detection works via error code parsing (REQUEST_LIMIT_EXCEEDED) instead.
-        raise_for_status(body, status, headers=None)
+            return records
 
-        records = body.get("records", [])
-        logger.debug("Query returned %d records", len(records))
-
-        return records
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, "query")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:
@@ -92,7 +144,7 @@ def query(
 
 def query_all(
     soql: str,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> List[Dict[str, Any]]:
     """Execute a SOQL query and return ALL results, handling pagination.
@@ -131,46 +183,42 @@ def query_all(
 
         all_records: List[Dict[str, Any]] = []
 
-        response = client.query(soql)
+        try:
+            # simple-salesforce query_all() automatically handles pagination
+            # and includes soft-deleted records (queryAll endpoint)
+            # We use query() + query_more() for consistency with original behavior
+            result = client.query(soql)
 
-        if response is None:
-            logger.error("Query returned None")
-            raise SalesforceAPIError(
-                message="Query failed - no response from Salesforce",
-                status_code=500
-            )
+            if result is None:
+                logger.error("Query returned None")
+                raise SalesforceAPIError(
+                    message="Query failed - no response from Salesforce",
+                    status_code=500
+                )
 
-        body, status = response if isinstance(response, tuple) else (response, 200)
-
-        # Raises typed exceptions for error status codes
-        raise_for_status(body, status)
-
-        records = body.get("records", [])
-        all_records.extend(records)
-
-        # Handle pagination via nextRecordsUrl
-        while not body.get("done", True) and body.get("nextRecordsUrl"):
-            next_url = body["nextRecordsUrl"]
-            logger.debug("Fetching next page: %s", next_url)
-
-            response = client.query_more(next_url)
-
-            if response is None:
-                logger.warning("Pagination query_more returned None at %s", next_url)
-                break
-
-            body, status = response if isinstance(response, tuple) else (response, 200)
-
-            # Raise exceptions for error status codes to trigger retry
-            # NOTE: headers=None because SalesforcePy 2.2.1 does not expose HTTP response headers.
-            raise_for_status(body, status, headers=None)
-
-            records = body.get("records", [])
+            records = result.get("records", [])
             all_records.extend(records)
 
-        logger.debug("Query returned total of %d records", len(all_records))
+            # Handle pagination via nextRecordsUrl
+            while not result.get("done", True) and result.get("nextRecordsUrl"):
+                next_url = result["nextRecordsUrl"]
+                logger.debug("Fetching next page: %s", next_url)
 
-        return all_records
+                result = client.query_more(next_url, identifier_is_url=True)
+
+                if result is None:
+                    logger.warning("Pagination query_more returned None at %s", next_url)
+                    break
+
+                records = result.get("records", [])
+                all_records.extend(records)
+
+            logger.debug("Query returned total of %d records", len(all_records))
+
+            return all_records
+
+        except SimpleSalesforceError as e:
+            _handle_salesforce_exception(e, "query_all")
 
     # Apply retry logic if configured
     if retry_config and retry_config.max_retries > 0:

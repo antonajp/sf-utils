@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 from psycopg2 import extensions
-from SalesforcePy.sfdc import Client
+from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.db import create_table_from_query, get_connection, upsert_records
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def create_bulk_query_job(
     sobject_type: str,
     soql_query: str,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> str:
     """Create a Bulk API 2.0 query job.
@@ -102,11 +102,10 @@ def create_bulk_query_job(
     @with_retry(retry_config)
     def _create_job():
         # Construct Bulk API 2.0 endpoint
-        # Format: https://{instance_url}/services/data/{version}/jobs/query
-        api_version = client.client_api_version or "v61.0"
-        # Remove 'v' prefix if present for URL construction
-        version = api_version.lstrip('v')
-        url = f"https://{client.instance_url}/services/data/v{version}/jobs/query"
+        # Format: https://{instance}/services/data/{version}/jobs/query
+        # simple-salesforce uses sf_version (without 'v' prefix) and sf_instance
+        version = client.sf_version
+        url = f"https://{client.sf_instance}/services/data/v{version}/jobs/query"
 
         # Prepare request body
         request_body = {
@@ -129,7 +128,7 @@ def create_bulk_query_job(
         )
 
         # Make HTTP request using requests library directly
-        # SalesforcePy doesn't expose native Bulk API 2.0 support
+        # simple-salesforce doesn't expose Bulk API 2.0 directly
         response = requests.post(
             url,
             json=request_body,
@@ -209,7 +208,7 @@ def create_bulk_query_job(
 
 def poll_bulk_job(
     job_id: str,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     timeout: float = 600.0,
     poll_interval: float = 5.0,
     max_poll_interval: float = 30.0,
@@ -313,10 +312,10 @@ def poll_bulk_job(
     )
 
     # Construct Bulk API 2.0 endpoint for job status
-    # Format: https://{instance_url}/services/data/{version}/jobs/query/{job_id}
-    api_version = client.client_api_version or "v61.0"
-    version = api_version.lstrip('v')
-    url = f"https://{client.instance_url}/services/data/v{version}/jobs/query/{job_id}"
+    # Format: https://{instance}/services/data/{version}/jobs/query/{job_id}
+    # simple-salesforce uses sf_version (without 'v' prefix) and sf_instance
+    version = client.sf_version
+    url = f"https://{client.sf_instance}/services/data/v{version}/jobs/query/{job_id}"
 
     # Prepare headers
     headers = {
@@ -494,7 +493,7 @@ def poll_bulk_job(
 
 def get_bulk_results(
     job_id: str,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     batch_size: int = 1000,
 ) -> Iterator[List[Dict[str, Any]]]:
     """Download and parse CSV results from a completed Bulk API 2.0 job.
@@ -574,10 +573,10 @@ def get_bulk_results(
     )
 
     # Construct Bulk API 2.0 endpoint for results
-    # Format: https://{instance_url}/services/data/{version}/jobs/query/{job_id}/results
-    api_version = client.client_api_version or "v61.0"
-    version = api_version.lstrip('v')
-    url = f"https://{client.instance_url}/services/data/v{version}/jobs/query/{job_id}/results"
+    # Format: https://{instance}/services/data/{version}/jobs/query/{job_id}/results
+    # simple-salesforce uses sf_version (without 'v' prefix) and sf_instance
+    version = client.sf_version
+    url = f"https://{client.sf_instance}/services/data/v{version}/jobs/query/{job_id}/results"
 
     # Prepare headers for CSV response
     headers = {
@@ -759,7 +758,7 @@ def sync_records_bulk(
     batch_size: int = 1000,
     poll_interval: float = 5.0,
     timeout: float = 600.0,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
 ) -> SyncResult:
     """Execute a Bulk API 2.0 sync for a Salesforce object.

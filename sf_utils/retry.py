@@ -232,16 +232,16 @@ def raise_for_status(body: Any, status: int, headers: Optional[Dict[str, str]] =
     """Raise appropriate exception for non-2xx status codes.
 
     This is the centralized error parsing function that converts HTTP responses
-    into typed exceptions.
+    into typed exceptions. Used primarily by bulk_sync.py for raw HTTP responses.
+
+    Note: query.py and sobjects.py now use simple-salesforce's exception handling
+    directly, which provides proper header access for rate limit information.
 
     Args:
         body: Response body from Salesforce API.
         status: HTTP status code.
         headers: Response headers (optional, used for Retry-After and API usage).
-            NOTE: SalesforcePy 2.2.1 does NOT expose HTTP response headers.
-            This parameter exists for API compatibility and future extensibility,
-            but will typically be None when called from query.py or sobjects.py.
-            Rate limit detection relies on error code parsing instead.
+            With simple-salesforce, headers are available on exceptions.
 
     Raises:
         SalesforceAuthError: For 401/403 status codes.
@@ -249,8 +249,9 @@ def raise_for_status(body: Any, status: int, headers: Optional[Dict[str, str]] =
         SalesforceAPIError: For other 4xx/5xx errors.
 
     Example:
-        >>> body, status = client.restful("Account/001xx000003DHP0AAO")
-        >>> raise_for_status(body, status)  # Raises exception if status >= 400
+        >>> # Used by bulk_sync.py for raw HTTP responses
+        >>> response = requests.get(url, headers=headers)
+        >>> raise_for_status(response.json(), response.status_code, dict(response.headers))
     """
     if status < 400:
         return  # Success

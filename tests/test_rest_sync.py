@@ -63,8 +63,8 @@ class TestDateChunkGeneration:
         ChunkInterval, query_chunked = import_rest_sync()
 
         mock_client = Mock()
-        # Return empty results for all chunks
-        mock_client.query.return_value = ({"records": [], "done": True}, 200)
+        # Return empty results for all chunks (simple-salesforce returns dicts directly)
+        mock_client.query.return_value = {"records": [], "done": True}
 
         soql = "SELECT Id FROM Account WHERE CreatedDate >= {start_date} AND CreatedDate < {end_date}"
         start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -88,7 +88,8 @@ class TestDateChunkGeneration:
         ChunkInterval, query_chunked = import_rest_sync()
 
         mock_client = Mock()
-        mock_client.query.return_value = ({"records": [], "done": True}, 200)
+        # simple-salesforce returns dicts directly
+        mock_client.query.return_value = {"records": [], "done": True}
 
         soql = "SELECT Id FROM Account WHERE CreatedDate >= {start_date} AND CreatedDate < {end_date}"
         start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -132,10 +133,8 @@ class TestDateChunkGeneration:
         ChunkInterval, query_chunked = import_rest_sync()
 
         mock_client = Mock()
-        mock_client.query.return_value = (
-            {"records": [{"Id": "001"}], "done": True},
-            200
-        )
+        # simple-salesforce returns dicts directly
+        mock_client.query.return_value = {"records": [{"Id": "001"}], "done": True}
 
         soql = "SELECT Id FROM Account WHERE CreatedDate >= {start_date} AND CreatedDate < {end_date}"
         start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
