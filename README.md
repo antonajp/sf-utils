@@ -329,12 +329,18 @@ client = get_client(config=password_config)
 
 ```python
 from sf_utils import query, query_all
+from pathlib import Path
 
-# Single batch (up to 2000 records)
+# Inline query - single batch (up to 2000 records)
 accounts = query("SELECT Id, Name FROM Account WHERE Industry = 'Technology'")
 
-# All records with automatic pagination
+# Inline query - all records with automatic pagination
 all_contacts = query_all("SELECT Id, FirstName, LastName, Email FROM Contact")
+
+# Read query from file (recommended for complex queries)
+# Store your SOQL files in the soql/ directory (gitignored)
+soql = Path("soql/accounts.soql").read_text()
+accounts = query_all(soql)
 ```
 
 ### CRUD Operations
@@ -748,6 +754,8 @@ sf-utils/
 │   └── crud_contact.py
 ├── projects/           # Your custom scripts (gitignored)
 │   └── .gitkeep
+├── soql/               # Your SOQL query files (gitignored)
+│   └── .gitkeep
 ├── scripts/            # Infrastructure setup
 │   ├── setup-db.sh
 │   └── setup-db.ps1
@@ -763,10 +771,14 @@ sf-utils/
 | `sf_utils/` | Library code - import from here, don't modify | Yes |
 | `examples/` | Sample scripts showing common patterns | Yes |
 | `projects/` | **Your custom scripts and projects** | No (gitignored) |
+| `soql/` | **Your SOQL query files** | No (gitignored) |
 | `scripts/` | Infrastructure setup (Docker, DB) | Yes |
 
 **Getting started:**
 ```bash
+# Create a SOQL query file
+echo "SELECT Id, Name, Industry FROM Account" > soql/accounts.soql
+
 # Copy an example as a starting point
 cp examples/query_accounts.py projects/my_report.py
 

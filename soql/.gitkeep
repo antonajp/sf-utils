@@ -1,0 +1,16 @@
+# This directory is for your SOQL query files.
+# Contents are gitignored - your queries stay local.
+#
+# Example:
+#   soql/
+#   ├── accounts.soql
+#   ├── contacts.soql
+#   ├── opportunities.soql
+#   └── custom/
+#       ├── monthly_report.soql
+#       └── pipeline_analysis.soql
+#
+# Usage in Python:
+#   from pathlib import Path
+#   soql = Path("soql/accounts.soql").read_text()
+#   results = query_all(soql)
