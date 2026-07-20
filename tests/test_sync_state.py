@@ -87,17 +87,16 @@ class TestGetSyncState:
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
 
-        # Mock nextset and fetchone: first returns lock result, second returns None (no row)
+        # Mock fetchone: first returns lock result, second returns None (no row)
         mock_cursor.fetchone.side_effect = [
             (None,),  # Lock result (discarded)
             None,     # SELECT result (no row found)
         ]
-        mock_cursor.nextset.return_value = True
 
         result = get_sync_state("Account", mock_conn)
 
         assert result is None
-        assert mock_cursor.execute.call_count == 1  # Single multi-statement query
+        assert mock_cursor.execute.call_count == 2  # Advisory lock + SELECT
 
     def test_returns_sync_state_row_when_exists(self):
         """Should return SyncStateRow when state exists."""
@@ -135,16 +134,20 @@ class TestGetSyncState:
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
         mock_cursor.fetchone.side_effect = [(None,), None]
-        mock_cursor.nextset.return_value = True
 
         get_sync_state("Account", mock_conn)
 
-        # Verify execute was called once with multi-statement query
-        assert mock_cursor.execute.call_count == 1
+        # Verify execute was called twice: advisory lock + SELECT
+        assert mock_cursor.execute.call_count == 2
 
-        # Query should contain advisory lock
-        query_str = str(mock_cursor.execute.call_args[0][0])
-        assert "pg_advisory_xact_lock" in query_str
+        # First call should be advisory lock
+        first_call_query = str(mock_cursor.execute.call_args_list[0][0][0])
+        assert "pg_advisory_xact_lock" in first_call_query
+
+        # Second call should be SELECT
+        second_call_query = str(mock_cursor.execute.call_args_list[1][0][0])
+        assert "SELECT" in second_call_query
+        assert "sf_sync_state" in second_call_query
 
     def test_uses_parameterized_query(self):
         """Should use psycopg2.sql for safe query construction."""
@@ -245,6 +248,7 @@ class TestUpdateSyncState:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [(None,)]  # Lock result
 
         timestamp = datetime(2024, 1, 15, 12, 30, 0, tzinfo=timezone.utc)
 
@@ -254,9 +258,16 @@ class TestUpdateSyncState:
             db_conn=mock_conn,
         )
 
-        # Verify query contains advisory lock
-        query_str = str(mock_cursor.execute.call_args[0][0])
-        assert "pg_advisory_xact_lock" in query_str
+        # Verify execute was called twice: advisory lock + UPSERT
+        assert mock_cursor.execute.call_count == 2
+
+        # First call should be advisory lock
+        first_call_query = str(mock_cursor.execute.call_args_list[0][0][0])
+        assert "pg_advisory_xact_lock" in first_call_query
+
+        # Second call should be UPSERT
+        second_call_query = str(mock_cursor.execute.call_args_list[1][0][0])
+        assert "INSERT INTO" in second_call_query
 
     def test_does_not_commit(self):
         """Should not commit transaction (caller's responsibility)."""
