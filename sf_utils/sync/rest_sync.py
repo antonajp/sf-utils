@@ -12,6 +12,7 @@ from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.db import get_connection, create_table_from_query, upsert_records
+from sf_utils.db.schema import _sanitize_column_name
 from sf_utils.exceptions import SalesforceAPIError
 from sf_utils.query import query_all
 from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG
@@ -525,9 +526,10 @@ def sync_records(
         records_updated = 0
 
         if all_records:
-            # Normalize record keys to lowercase to match table column names
+            # Normalize record keys using same sanitization as table creation
+            # This ensures keys like "CreatedBy.Id" match columns like "createdby_id"
             normalized_records = [
-                {k.lower(): v for k, v in record.items()}
+                {_sanitize_column_name(k): v for k, v in record.items()}
                 for record in all_records
             ]
             logger.info("Upserting %d records to %s", records_fetched, table_name)
