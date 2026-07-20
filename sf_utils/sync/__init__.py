@@ -18,6 +18,7 @@ from sf_utils.sync.state import (
     get_sync_state,
     update_sync_state,
 )
+from sf_utils.sync.config import SyncJobConfig, load_sync_config
 
 logger = logging.getLogger(__name__)
 
@@ -216,4 +217,6 @@ __all__ = [
     "update_sync_state",
     "sync",
     "SyncMode",
+    "SyncJobConfig",
+    "load_sync_config",
 ]
