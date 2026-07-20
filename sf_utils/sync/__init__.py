@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Optional
 
 from psycopg2 import extensions
-from SalesforcePy.sfdc import Client
+from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.query import query
@@ -46,7 +46,7 @@ def sync(
     batch_size: int = 1000,
     poll_interval: float = 5.0,
     timeout: float = 600.0,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
 ) -> SyncResult:
     """Execute a sync with automatic or explicit API mode selection.

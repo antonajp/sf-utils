@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any, Dict, Generator, List, Optional
 
 from psycopg2 import extensions
-from SalesforcePy.sfdc import Client
+from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.db import get_connection, create_table_from_query, upsert_records
@@ -99,7 +99,7 @@ def query_chunked(
     start_date: datetime,
     end_date: datetime,
     chunk_size: ChunkInterval = ChunkInterval.DAILY,
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> Generator[List[Dict[str, Any]], None, None]:
     """Execute a SOQL query in date-chunked batches with automatic pagination.
@@ -365,7 +365,7 @@ def sync_records(
     validate_date_field: bool = True,
     chunk_size: ChunkInterval = ChunkInterval.DAILY,
     mode: str = "incremental",
-    client: Optional[Client] = None,
+    client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
 ) -> SyncResult:
