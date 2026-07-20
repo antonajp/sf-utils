@@ -133,21 +133,19 @@ def get_sync_state(
     # Compute advisory lock key
     lock_key = _compute_advisory_lock_key(object_name)
 
-    # Combined multi-statement query (lock + SELECT)
-    query = sql.SQL(
-        "SELECT pg_advisory_xact_lock(%s);"
-        " SELECT object_name, last_sync_timestamp, last_sync_id, sync_mode, updated_at"
+    cursor = db_conn.cursor()
+
+    # Acquire advisory lock (transaction-scoped, released on commit/rollback)
+    logger.debug("Acquiring advisory lock for %s (key=%d)", object_name, lock_key)
+    cursor.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
+    cursor.fetchone()  # Consume the result
+
+    # Query sync state
+    select_query = sql.SQL(
+        "SELECT object_name, last_sync_timestamp, last_sync_id, sync_mode, updated_at"
         " FROM sf_sync_state WHERE object_name = %s"
     )
-
-    cursor = db_conn.cursor()
-    cursor.execute(query, (lock_key, object_name))
-
-    # Fetch lock result (discard)
-    cursor.fetchone()
-
-    # Move to next result set (SELECT from sf_sync_state)
-    cursor.nextset()
+    cursor.execute(select_query, (object_name,))
 
     row = cursor.fetchone()
     if row is None:
@@ -226,10 +224,16 @@ def update_sync_state(
     # Compute advisory lock key
     lock_key = _compute_advisory_lock_key(object_name)
 
-    # Combined multi-statement query (lock + UPSERT)
-    query = sql.SQL(
-        "SELECT pg_advisory_xact_lock(%s);"
-        " INSERT INTO sf_sync_state (object_name, last_sync_timestamp, last_sync_id, sync_mode, updated_at)"
+    cursor = db_conn.cursor()
+
+    # Acquire advisory lock (transaction-scoped, released on commit/rollback)
+    logger.debug("Acquiring advisory lock for %s (key=%d)", object_name, lock_key)
+    cursor.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
+    cursor.fetchone()  # Consume the result
+
+    # Upsert sync state
+    upsert_query = sql.SQL(
+        "INSERT INTO sf_sync_state (object_name, last_sync_timestamp, last_sync_id, sync_mode, updated_at)"
         " VALUES (%s, %s, %s, %s, NOW())"
         " ON CONFLICT (object_name)"
         " DO UPDATE SET"
@@ -238,12 +242,7 @@ def update_sync_state(
         " sync_mode = EXCLUDED.sync_mode,"
         " updated_at = NOW()"
     )
-
-    cursor = db_conn.cursor()
-    cursor.execute(query, (lock_key, object_name, timestamp, sync_id, mode))
-
-    # Fetch lock result (discard)
-    cursor.fetchone()
+    cursor.execute(upsert_query, (object_name, timestamp, sync_id, mode))
 
     # Caller controls transaction, do NOT commit here
 
