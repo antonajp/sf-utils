@@ -7,6 +7,7 @@ Salesforce data synchronization jobs using Click.
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -150,7 +151,6 @@ def _execute_sync(
         click.echo("Run without --dry-run to execute sync")
 
         # Return empty result for dry run
-        from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         return SyncResult(
             object_name=object_name,
@@ -238,7 +238,6 @@ def _execute_sync(
         )
 
         # Store duration in result for output
-        # Note: SyncResult doesn't have duration field, so we'll format it separately
         result._duration = duration  # Store for output formatting
 
         return result
@@ -270,10 +269,19 @@ def _print_sync_summary(object_name: str, result: SyncResult, dry_run: bool) -> 
         click.echo(f"Duration: {duration:.1f}s")
 
     click.echo(f"Mode: {result.sync_mode}")
-    click.echo(f"Status: SUCCESS")
+    click.echo("Status: SUCCESS")
 
 
-@click.command()
+@click.group()
+def cli() -> None:
+    """Salesforce sync CLI.
+
+    Sync Salesforce data to local PostgreSQL database using REST or Bulk API.
+    """
+    pass
+
+
+@cli.command("sync")
 @click.argument("object_name", required=False)
 @click.option(
     "--all",
@@ -303,7 +311,7 @@ def _print_sync_summary(object_name: str, result: SyncResult, dry_run: bool) -> 
     is_flag=True,
     help="Enable debug logging for detailed output",
 )
-def main(
+def sync_cmd(
     object_name: Optional[str],
     sync_all: bool,
     dry_run: bool,
@@ -319,23 +327,23 @@ def main(
     Examples:
 
         # Sync a single object using auto mode
-        sf-sync Account
+        sf-sync sync Account
 
         # Sync all enabled objects from config
-        sf-sync --all
+        sf-sync sync --all
 
         # Preview sync without executing
-        sf-sync --dry-run Account
+        sf-sync sync --dry-run Account
 
         # Force specific sync mode
-        sf-sync --mode bulk Account
-        sf-sync --mode rest Contact
+        sf-sync sync --mode bulk Account
+        sf-sync sync --mode rest Contact
 
         # Use custom config file
-        sf-sync --config ./my_config.yaml Account
+        sf-sync sync --config ./my_config.yaml Account
 
         # Enable debug logging
-        sf-sync --verbose Account
+        sf-sync sync --verbose Account
 
     Credentials are loaded from environment variables:
         SF_USERNAME, SF_PASSWORD, SF_CLIENT_ID, SF_CLIENT_SECRET
@@ -449,5 +457,10 @@ def main(
         sys.exit(1)
 
 
+# Register status command from separate module
+from sf_utils.cli_status import register_status_command
+register_status_command(cli)
+
+
 if __name__ == "__main__":
-    main()
+    cli()
