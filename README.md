@@ -115,7 +115,8 @@ OpenSSL is not included in Windows. The easiest option is to use **Git Bash** wh
 openssl genrsa -out server.key 2048
 
 # Generate self-signed X.509 certificate (valid 1 year)
-openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/CN=sf-utils"
+# Note: Use double slashes //CN= to prevent Git Bash path conversion
+openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "//CN=sf-utils"
 ```
 
 > **Tip**: Store your key in a persistent location like `C:\Users\YourName\.ssh\server.key` and reference that path in `SF_PRIVATE_KEY_PATH`.
