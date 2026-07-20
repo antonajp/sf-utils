@@ -78,7 +78,7 @@ This library supports two authentication methods. **JWT Bearer is recommended** 
 
 #### JWT Bearer Flow (Recommended)
 
-Required for MFA-enabled orgs and phishing-resistant Connected Apps.
+Required for MFA-enabled orgs. Uses External Client Apps (ECAs), Salesforce's next-generation integration framework.
 
 **Environment Variables:**
 
@@ -136,42 +136,47 @@ openssl req -new -x509 -key sf-prod-server.key -out sf-prod-server.crt -days 365
 
 > **Tip**: Store keys in `~/.ssh/salesforce/` (Linux/macOS) or `C:\Users\YourName\.ssh\salesforce\` (Windows) to keep them organized and secure.
 
-**Step 2: Create Connected App in Salesforce**
+**Step 2: Create External Client App in Salesforce**
+
+> **Note**: Salesforce has deprecated Connected Apps in favor of [External Client Apps (ECA)](https://www.salesforceben.com/external-client-vs-connected-apps-comparing-salesforces-next-gen-integration/). ECAs provide better security defaults and clearer separation between developer and admin responsibilities.
 
 Repeat this step for each org (production and each sandbox). Use the corresponding certificate for each org.
 
-1. **Setup** → **Apps** → **App Manager** → **New Connected App**
+1. **Setup** → Quick Find: "External" → **External Client App Manager** → **New External Client App**
 2. Fill in basic info:
-   - Connected App Name: `sf-utils-stg` (include org identifier: `-prod`, `-stg`, `-dev`, etc.)
-   - API Name: auto-generated
-   - Contact Email: your email
-3. **Enable OAuth Settings**:
-   - Callback URL: `https://localhost/callback` (not used for JWT, but required)
-   - **Enable for Device Flow**: unchecked
+   - **External Client App Name**: `sf-utils-stg` (include org identifier: `-prod`, `-stg`, `-dev`, etc.)
+   - **API Name**: auto-generated from app name
+   - **Contact Email**: your email
+   - **Distribution State**: Select "Local" (for your own org)
+3. Click **Create** to save the basic app
+
+**Step 3: Configure OAuth Settings**
+
+1. In the External Client App Manager, click on your newly created app
+2. Go to the **Settings** tab → **OAuth Settings** → **New**
+3. Configure OAuth:
+   - **Callback URL**: `https://localhost/callback` (not used for JWT, but required)
    - **Selected OAuth Scopes**: Add these scopes:
-     - `Access and manage your data (api)`
-     - `Perform requests on your behalf at any time (refresh_token, offline_access)`
-4. **Use digital signatures**: ✅ Check this box
-5. **Upload the certificate**: Upload `server.crt` (the public key)
-6. Save and note the **Consumer Key** (this is your `SF_CLIENT_ID`)
+     - `Manage user data via APIs (api)`
+     - `Perform requests at any time (refresh_token, offline_access)`
+4. In the **Flow Enablement** section:
+   - ✅ Check **Enable JWT Bearer Flow**
+   - **Upload Certificate**: Upload your `.crt` file (e.g., `sf-stg-server.crt`)
+5. Click **Save**
+6. Copy the **Consumer Key** from the Settings tab (this is your `SF_CLIENT_ID`)
 
-**Step 3: Configure OAuth Policies**
+**Step 4: Configure OAuth Policies & Pre-authorize Users**
 
-1. After saving, click **Manage** on your Connected App
-2. Click **Edit Policies**
-3. Under **OAuth Policies**:
-   - **Permitted Users**: Select "Admin approved users are pre-authorized"
-   - **IP Relaxation**: Select "Relax IP restrictions" (for server-to-server)
-4. Save
+1. In your External Client App, go to the **Policies** tab
+2. Click **Edit** in the OAuth Policies section
+3. Set **Permitted Users** to: "Admin approved users are pre-authorized"
+4. Set **IP Relaxation** to: "Relax IP restrictions" (for server-to-server)
+5. Click **Save**
+6. In the **App Policies** section, click **Add** next to Permission Sets
+7. Add the permission sets for users who will authenticate via JWT
+   - If you don't have a dedicated permission set, add the user's profile-based permission set or create one
 
-**Step 4: Pre-authorize Users**
-
-1. Go to **Setup** → **Connected Apps** → **Manage Connected Apps**
-2. Click on your Connected App
-3. Click **Manage Profiles** or **Manage Permission Sets**
-4. Add the profiles/permission sets for users who will authenticate via JWT
-
-> **Note**: Unlike password flow, JWT Bearer requires explicit pre-authorization. Users not in the approved profiles/permission sets cannot authenticate.
+> **Note**: Unlike password flow, JWT Bearer requires explicit pre-authorization. Users not assigned to an approved permission set cannot authenticate. See [Salesforce Help: Pre-authorize User Access](https://help.salesforce.com/s/articleView?id=xcloud.preauth_user_app_access_through_eca.htm&type=5) for details.
 
 **Step 5: Configure Environment**
 
@@ -237,11 +242,14 @@ SF_SANDBOX=false          # true for sandbox orgs
 SF_API_VERSION=v61.0      # optional
 ```
 
-**Setup a Connected App in Salesforce:**
-1. Setup → Apps → App Manager → New Connected App
-2. Enable OAuth Settings
-3. Add scopes: `api`, `refresh_token`
-4. Copy Consumer Key (Client ID) and Consumer Secret
+**Setup in Salesforce:**
+
+You can use either a legacy Connected App or an External Client App (ECA):
+1. **Connected App**: Setup → Apps → App Manager → New Connected App
+2. **External Client App**: Setup → External Client App Manager → New External Client App
+3. Enable OAuth Settings
+4. Add scopes: `api`, `refresh_token`
+5. Copy Consumer Key (Client ID) and Consumer Secret
 
 > **Note**: Password flow will fail if your org has MFA enforcement or phishing-resistant policies enabled. Use JWT Bearer flow instead.
 
