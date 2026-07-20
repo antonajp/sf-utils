@@ -1,0 +1,10 @@
+# This directory is for your custom scripts and projects.
+# Contents are gitignored - your work stays local.
+#
+# Example:
+#   projects/
+#   ├── export_monthly_report.py
+#   ├── sync_contacts_to_postgres.py
+#   └── my_analysis/
+#       ├── pipeline.py
+#       └── config.yaml
