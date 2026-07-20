@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sf-sync = "sf_utils.cli:main"
+sf-sync = "sf_utils.cli:cli"
 
 [project.optional-dependencies]
 dev = [

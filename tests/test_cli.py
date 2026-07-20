@@ -6,9 +6,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 from click.testing import CliRunner
 
-from sf_utils.cli import main, _validate_arguments, _configure_logging
+from sf_utils.cli import cli, _validate_arguments, _configure_logging
 from sf_utils.sync.config import SyncJobConfig
 from sf_utils.sync.rest_sync import SyncResult
+
+
+# Compatibility alias for old tests
+main = cli
 
 
 class TestValidateArguments:
@@ -79,7 +83,7 @@ class TestCLICommand:
         config_file = tmp_path / "sync_config.yaml"
         config_file.write_text("syncs: []")
 
-        result = runner.invoke(main, ["--config", str(config_file)], catch_exceptions=False)
+        result = runner.invoke(main, ["sync", "--config", str(config_file)], catch_exceptions=False)
 
         # Click raises SystemExit(2) for usage errors, which becomes exit_code=2
         assert result.exit_code in [1, 2]
@@ -91,7 +95,7 @@ class TestCLICommand:
         config_file = tmp_path / "sync_config.yaml"
         config_file.write_text("syncs: []")
 
-        result = runner.invoke(main, ["Account", "--all", "--config", str(config_file)], catch_exceptions=False)
+        result = runner.invoke(main, ["sync", "Account", "--all", "--config", str(config_file)], catch_exceptions=False)
 
         # Click raises SystemExit(2) for usage errors, which becomes exit_code=2
         assert result.exit_code in [1, 2]
@@ -137,9 +141,7 @@ syncs:
         ]
 
         # Run with --dry-run
-        result = runner.invoke(
-            main,
-            ["Account", "--config", str(config_file), "--dry-run"],
+        result = runner.invoke(main, ["sync", "Account", "--config", str(config_file), "--dry-run"],
         )
 
         # Assertions
@@ -220,9 +222,7 @@ syncs:
         mock_sync.return_value = mock_result
 
         # Run CLI
-        result = runner.invoke(
-            main,
-            ["Account", "--config", str(config_file)],
+        result = runner.invoke(main, ["sync", "Account", "--config", str(config_file)],
             catch_exceptions=False,
         )
 
@@ -244,9 +244,7 @@ syncs:
             "Config file not found: nonexistent.yaml"
         )
 
-        result = runner.invoke(
-            main,
-            ["Account", "--config", "nonexistent.yaml"],
+        result = runner.invoke(main, ["sync", "Account", "--config", "nonexistent.yaml"],
             catch_exceptions=False,
         )
 
@@ -278,9 +276,7 @@ syncs:
             )
         ]
 
-        result = runner.invoke(
-            main,
-            ["Account", "--config", str(config_file)],
+        result = runner.invoke(main, ["sync", "Account", "--config", str(config_file)],
         )
 
         assert result.exit_code == 1
@@ -356,9 +352,7 @@ syncs:
         mock_sync.return_value = mock_result
 
         # Run CLI with --all
-        result = runner.invoke(
-            main,
-            ["--all", "--config", str(config_file)],
+        result = runner.invoke(main, ["sync", "--all", "--config", str(config_file)],
             catch_exceptions=False,
         )
 
@@ -443,9 +437,7 @@ syncs:
         mock_sync.return_value = mock_result
 
         # Run CLI with --mode bulk
-        result = runner.invoke(
-            main,
-            ["Account", "--config", str(config_file), "--mode", "bulk"],
+        result = runner.invoke(main, ["sync", "Account", "--config", str(config_file), "--mode", "bulk"],
             catch_exceptions=False,
         )
 
@@ -519,9 +511,7 @@ syncs:
         mock_sync.return_value = mock_result
 
         # Run CLI with --mode rest (overrides config mode=bulk)
-        result = runner.invoke(
-            main,
-            ["Account", "--config", str(config_file), "--mode", "rest"],
+        result = runner.invoke(main, ["sync", "Account", "--config", str(config_file), "--mode", "rest"],
             catch_exceptions=False,
         )
 
@@ -603,9 +593,7 @@ syncs:
         mock_sync.return_value = mock_result
 
         # Run CLI
-        result = runner.invoke(
-            main,
-            ["Contact", "--config", str(config_file)],
+        result = runner.invoke(main, ["sync", "Contact", "--config", str(config_file)],
             catch_exceptions=False,
         )
 
@@ -674,9 +662,7 @@ syncs:
         )
 
         # Run CLI
-        result = runner.invoke(
-            main,
-            ["Account", "--config", str(config_file)],
+        result = runner.invoke(main, ["sync", "Account", "--config", str(config_file)],
         )
 
         # Verify exit code is non-zero
@@ -697,6 +683,7 @@ class TestHelpAndUsage:
 
     def test_help_flag_shows_usage(self, runner):
         """sf-sync --help should display help text with usage information."""
+        # Test group-level help
         result = runner.invoke(main, ['--help'])
 
         # Verify exit code is 0 (help is not an error)
@@ -704,11 +691,17 @@ class TestHelpAndUsage:
 
         # Verify help text is displayed
         assert "Usage" in result.output or "usage" in result.output.lower()
-        assert "--all" in result.output
-        assert "--mode" in result.output
-        assert "--config" in result.output
-        assert "--verbose" in result.output
-        assert "--dry-run" in result.output
+        assert "sync" in result.output  # sync command listed
+        assert "status" in result.output  # status command listed
+
+        # Test sync subcommand help
+        result_sync = runner.invoke(main, ['sync', '--help'])
+        assert result_sync.exit_code == 0
+        assert "--all" in result_sync.output
+        assert "--mode" in result_sync.output
+        assert "--config" in result_sync.output
+        assert "--verbose" in result_sync.output
+        assert "--dry-run" in result_sync.output
 
 
 class TestIntegrationScenarios:
@@ -790,9 +783,7 @@ syncs:
         ]
 
         # Run CLI
-        result = runner.invoke(
-            main,
-            ["--all", "--config", str(config_file)],
+        result = runner.invoke(main, ["sync", "--all", "--config", str(config_file)],
         )
 
         # Verify partial failure is reported
@@ -801,3 +792,5 @@ syncs:
 
         # CLI should report the failure
         assert "Failed: 1" in result.output or "Error" in result.output
+
+
