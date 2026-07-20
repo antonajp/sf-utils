@@ -360,7 +360,7 @@ syncs:
 | Unknown size | Auto (`auto`) | Queries count first, then chooses |
 
 **Auto mode behavior:**
-1. Runs `SELECT COUNT() FROM {object}` to get record count
+1. Runs `SELECT COUNT(Id) FROM {object}` to get record count
 2. If count < 10,000, uses REST API
 3. If count >= 10,000, uses Bulk API 2.0
 

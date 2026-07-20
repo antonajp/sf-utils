@@ -100,7 +100,7 @@ class TestSyncAutoModeSelection:
         assert mock_query.called
         count_query_call = mock_query.call_args
         # Implementation uses COUNT() FROM object_name
-        assert "SELECT COUNT() FROM Account" in count_query_call[0][0]
+        assert "SELECT COUNT(Id) FROM Account" in count_query_call[0][0]
         assert count_query_call[1]['client'] == mock_client
 
         # Verify sync_records (REST API) was called, NOT sync_records_bulk
@@ -185,7 +185,7 @@ class TestSyncAutoModeSelection:
         # Verify query was called to get count
         assert mock_query.called
         count_query_call = mock_query.call_args
-        assert "SELECT COUNT() FROM Account" in count_query_call[0][0]
+        assert "SELECT COUNT(Id) FROM Account" in count_query_call[0][0]
 
         # Verify sync_records_bulk (Bulk API) was called
         assert mock_sync_records_bulk.called
@@ -443,8 +443,8 @@ class TestSyncCountQuery:
         count_query_call = mock_query.call_args
         count_soql = count_query_call[0][0]
 
-        # Implementation uses simple: SELECT COUNT() FROM {object_name}
-        assert "SELECT COUNT() FROM Account" == count_soql
+        # Implementation uses simple: SELECT COUNT(Id) FROM {object_name}
+        assert "SELECT COUNT(Id) FROM Account" == count_soql
 
     @patch('sf_utils.sync.sync_records')
     @patch('sf_utils.sync.query')
@@ -483,8 +483,8 @@ class TestSyncCountQuery:
         count_query_call = mock_query.call_args
         count_soql = count_query_call[0][0]
 
-        # Count query should be simple: SELECT COUNT() FROM {object_name}
-        assert "SELECT COUNT() FROM Account" == count_soql
+        # Count query should be simple: SELECT COUNT(Id) FROM {object_name}
+        assert "SELECT COUNT(Id) FROM Account" == count_soql
 
 
 class TestSyncErrorHandling:

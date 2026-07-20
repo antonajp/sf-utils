@@ -141,12 +141,12 @@ def sync(
     if mode == SyncMode.AUTO:
         # Query Salesforce for record count
         logger.debug("AUTO mode: querying record count for %s", object_name)
-        count_soql = f"SELECT COUNT() FROM {object_name}"
+        count_soql = f"SELECT COUNT(Id) FROM {object_name}"
 
         try:
             # Use query() from sf_utils.query to get count
             result = query(count_soql, client=client)
-            # COUNT() returns as expr0 in the first (and only) record
+            # COUNT(Id) returns as expr0 in the first (and only) record
             record_count = result[0].get("expr0", 0) if result else 0
             logger.debug("Record count for %s: %d", object_name, record_count)
 
