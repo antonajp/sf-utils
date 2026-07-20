@@ -382,6 +382,90 @@ metadata = describe_object("Account")
 fields = [f["name"] for f in metadata["fields"]]
 ```
 
+### Database Schema Management
+
+Create PostgreSQL tables for caching Salesforce data locally.
+
+**Option 1: Typed Tables (Recommended)**
+
+Use `create_table_from_describe()` to create tables with proper PostgreSQL types based on Salesforce field metadata:
+
+```python
+from sf_utils.db import get_connection, create_table_from_describe
+from sf_utils import get_client
+
+conn = get_connection()
+client = get_client()
+
+# Create table with typed columns from Salesforce metadata
+created = create_table_from_describe(
+    table_name="sf_account",
+    sobject_type="Account",
+    fields=["Id", "Name", "AnnualRevenue", "CreatedDate", "IsActive"],
+    client=client,
+    db_conn=conn,
+)
+# Creates: id TEXT PRIMARY KEY, name TEXT, annualrevenue NUMERIC,
+#          createddate TIMESTAMP WITH TIME ZONE, isactive BOOLEAN
+```
+
+Type mappings:
+
+| Salesforce Type | PostgreSQL Type |
+|----------------|-----------------|
+| id, string, picklist, email, url, phone | TEXT |
+| int | INTEGER |
+| double, currency, percent | NUMERIC |
+| boolean | BOOLEAN |
+| date | DATE |
+| datetime | TIMESTAMP WITH TIME ZONE |
+| location, address | JSONB |
+
+Custom type overrides:
+
+```python
+def custom_mapper(sf_type):
+    if sf_type == "string":
+        return "VARCHAR(255)"  # Limit string fields
+    return None  # Use default for other types
+
+create_table_from_describe(
+    table_name="sf_account",
+    sobject_type="Account",
+    fields=["Id", "Name"],
+    type_mapper=custom_mapper,
+    db_conn=conn,
+)
+```
+
+**Option 2: TEXT-only Tables (Quick)**
+
+Use `create_table_from_query()` for fast prototyping (all columns are TEXT):
+
+```python
+from sf_utils.db import get_connection, create_table_from_query
+
+conn = get_connection()
+
+# Create table from SOQL query (all TEXT columns)
+create_table_from_query(
+    table_name="sf_account",
+    soql_query="SELECT Id, Name, Industry FROM Account",
+    db_conn=conn,
+)
+# Creates: id TEXT PRIMARY KEY, name TEXT, industry TEXT
+```
+
+**When to use each:**
+
+| Scenario | Function | Reason |
+|----------|----------|--------|
+| Date filtering (`WHERE date >= '2024-01-01'`) | `create_table_from_describe` | Proper DATE type enables comparisons |
+| Numeric aggregations (`SUM(amount)`) | `create_table_from_describe` | NUMERIC type required for math |
+| Boolean filters (`WHERE active = true`) | `create_table_from_describe` | BOOLEAN type for logic |
+| Quick prototyping | `create_table_from_query` | Faster, no describe() API call |
+| Unknown field types | `create_table_from_query` | All TEXT, always works |
+
 ## Data Flow Pattern
 
 ```
