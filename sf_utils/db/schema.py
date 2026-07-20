@@ -2,11 +2,15 @@
 
 import logging
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import psycopg2
 from psycopg2 import extensions, sql
 from psycopg2.extras import execute_values
+from simple_salesforce import Salesforce
+
+from sf_utils.db.types import SALESFORCE_TYPE_TO_POSTGRES, get_postgres_type
+from sf_utils.sobjects import describe_object
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +133,7 @@ def create_table_from_query(
     table_name: str,
     soql_query: str,
     db_conn: extensions.connection,
+    *,
     if_not_exists: bool = True,
 ) -> bool:
     """Create a PostgreSQL table from SOQL SELECT columns.
@@ -411,5 +416,175 @@ def upsert_records(
         raise psycopg2.DatabaseError(
             f"Failed to upsert {total_records} records to table {table_name}: {e}"
         ) from e
+    finally:
+        cursor.close()
+
+
+def create_table_from_describe(
+    table_name: str,
+    sobject_type: str,
+    fields: List[str],
+    *,
+    if_not_exists: bool = True,
+    type_mapper: Optional[Callable[[str], Optional[str]]] = None,
+    client: Optional[Salesforce] = None,
+    db_conn: extensions.connection,
+) -> bool:
+    """Create a PostgreSQL table with typed columns from Salesforce describe() metadata.
+
+    Uses the Salesforce describe() API to get field type information and maps
+    Salesforce types to appropriate PostgreSQL types for proper date filtering,
+    numeric aggregations, and boolean logic.
+
+    Args:
+        table_name: PostgreSQL table name (e.g., 'sf_account').
+        sobject_type: Salesforce object type (e.g., 'Account', 'Contact').
+        fields: List of Salesforce field API names to include (e.g., ['Id', 'Name', 'AnnualRevenue']).
+        if_not_exists: If True, use CREATE TABLE IF NOT EXISTS. Default True.
+        type_mapper: Optional custom type mapper function. Takes Salesforce type string,
+            returns PostgreSQL type string or None to use default mapping.
+        client: Authenticated Salesforce client. If None, creates from environment.
+        db_conn: psycopg2 database connection.
+
+    Returns:
+        True if table was created, False if it already existed.
+
+    Raises:
+        ValueError: If fields list is empty or missing 'Id' field.
+        SalesforceAPIError: If describe() API call fails.
+        psycopg2.Error: For database errors.
+    """
+    logger.debug(
+        "create_table_from_describe: table_name=%s sobject_type=%s fields=%s if_not_exists=%s",
+        table_name,
+        sobject_type,
+        fields,
+        if_not_exists,
+    )
+
+    # Validate fields list
+    if not fields:
+        error_msg = "fields list must not be empty"
+        logger.error("Invalid input: %s", error_msg)
+        raise ValueError(error_msg)
+
+    # Normalize field names to lowercase for comparison
+    fields_lower = [f.lower() for f in fields]
+
+    if "id" not in fields_lower:
+        error_msg = "fields list must include 'Id' field for primary key"
+        logger.error("Invalid input: %s", error_msg)
+        raise ValueError(error_msg)
+
+    # Get describe metadata from Salesforce
+    logger.debug("Calling describe_object for %s", sobject_type)
+    describe_result = describe_object(sobject_type, client=client)
+
+    # Build field name to type mapping from describe result
+    field_metadata: Dict[str, str] = {}
+    for field_info in describe_result.get("fields", []):
+        field_name = field_info.get("name", "").lower()
+        field_type = field_info.get("type", "")
+        if field_name:
+            field_metadata[field_name] = field_type
+            logger.debug(
+                "Field metadata: %s -> type=%s",
+                field_name,
+                field_type,
+            )
+
+    # Build column definitions
+    column_defs = []
+    columns_created = []
+
+    for field in fields:
+        field_lower = field.lower()
+        sanitized_name = _sanitize_column_name(field)
+
+        # Get Salesforce type from describe metadata
+        sf_type = field_metadata.get(field_lower, "")
+
+        if not sf_type:
+            logger.warning(
+                "Field '%s' not found in describe() result for %s, defaulting to TEXT",
+                field,
+                sobject_type,
+            )
+            pg_type = "TEXT"
+        else:
+            pg_type = get_postgres_type(sf_type, type_mapper)
+
+        logger.debug(
+            "Column: %s (field=%s, sf_type=%s, pg_type=%s)",
+            sanitized_name,
+            field,
+            sf_type,
+            pg_type,
+        )
+
+        # Build column definition with PRIMARY KEY for id
+        if sanitized_name == "id":
+            column_defs.append(
+                sql.SQL("{} {} PRIMARY KEY").format(
+                    sql.Identifier(sanitized_name),
+                    sql.SQL(pg_type),
+                )
+            )
+        else:
+            column_defs.append(
+                sql.SQL("{} {}").format(
+                    sql.Identifier(sanitized_name),
+                    sql.SQL(pg_type),
+                )
+            )
+
+        columns_created.append(sanitized_name)
+
+    # Build CREATE TABLE statement
+    create_stmt = sql.SQL(
+        "CREATE TABLE {if_not_exists} {table} ({columns})"
+    ).format(
+        if_not_exists=sql.SQL("IF NOT EXISTS" if if_not_exists else ""),
+        table=sql.Identifier(table_name),
+        columns=sql.SQL(", ").join(column_defs),
+    )
+
+    # Execute CREATE TABLE
+    cursor = db_conn.cursor()
+    try:
+        logger.debug(
+            "Executing CREATE TABLE for %s with %d typed columns",
+            table_name,
+            len(columns_created),
+        )
+        cursor.execute(create_stmt)
+        db_conn.commit()
+
+        # Check if table exists to determine if it was created or already existed
+        cursor.execute(
+            sql.SQL("SELECT to_regclass({})").format(sql.Literal(table_name))
+        )
+        table_exists = cursor.fetchone()[0] is not None
+
+        if table_exists:
+            logger.info(
+                "Table created successfully: %s with %d typed columns: %s",
+                table_name,
+                len(columns_created),
+                columns_created,
+            )
+            return True
+        else:
+            logger.info("Table already existed: %s", table_name)
+            return False
+
+    except psycopg2.Error as e:
+        db_conn.rollback()
+        logger.error(
+            "Failed to create table %s: %s",
+            table_name,
+            str(e),
+        )
+        raise
     finally:
         cursor.close()

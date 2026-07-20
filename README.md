@@ -170,7 +170,7 @@ Repeat this step for each org (production and each sandbox). Use the correspondi
 1. In your External Client App, go to the **Policies** tab
 2. Click **Edit** in the OAuth Policies section
 3. Set **Permitted Users** to: "Admin approved users are pre-authorized"
-4. Set **IP Relaxation** to: "Relax IP restrictions" (for server-to-server)
+4. Set **IP Relaxation** to: "Enforce IP restrictions" (recommended for corporate firewall security)
 5. Click **Save**
 6. In the **App Policies** section, click **Add** next to Permission Sets
 7. Add the permission sets for users who will authenticate via JWT
@@ -329,12 +329,18 @@ client = get_client(config=password_config)
 
 ```python
 from sf_utils import query, query_all
+from pathlib import Path
 
-# Single batch (up to 2000 records)
+# Inline query - single batch (up to 2000 records)
 accounts = query("SELECT Id, Name FROM Account WHERE Industry = 'Technology'")
 
-# All records with automatic pagination
+# Inline query - all records with automatic pagination
 all_contacts = query_all("SELECT Id, FirstName, LastName, Email FROM Contact")
+
+# Read query from file (recommended for complex queries)
+# Store your SOQL files in the soql/ directory (gitignored)
+soql = Path("soql/accounts.soql").read_text()
+accounts = query_all(soql)
 ```
 
 ### CRUD Operations
@@ -381,6 +387,90 @@ from sf_utils import describe_object
 metadata = describe_object("Account")
 fields = [f["name"] for f in metadata["fields"]]
 ```
+
+### Database Schema Management
+
+Create PostgreSQL tables for caching Salesforce data locally.
+
+**Option 1: Typed Tables (Recommended)**
+
+Use `create_table_from_describe()` to create tables with proper PostgreSQL types based on Salesforce field metadata:
+
+```python
+from sf_utils.db import get_connection, create_table_from_describe
+from sf_utils import get_client
+
+conn = get_connection()
+client = get_client()
+
+# Create table with typed columns from Salesforce metadata
+created = create_table_from_describe(
+    table_name="sf_account",
+    sobject_type="Account",
+    fields=["Id", "Name", "AnnualRevenue", "CreatedDate", "IsActive"],
+    client=client,
+    db_conn=conn,
+)
+# Creates: id TEXT PRIMARY KEY, name TEXT, annualrevenue NUMERIC,
+#          createddate TIMESTAMP WITH TIME ZONE, isactive BOOLEAN
+```
+
+Type mappings:
+
+| Salesforce Type | PostgreSQL Type |
+|----------------|-----------------|
+| id, string, picklist, email, url, phone | TEXT |
+| int | INTEGER |
+| double, currency, percent | NUMERIC |
+| boolean | BOOLEAN |
+| date | DATE |
+| datetime | TIMESTAMP WITH TIME ZONE |
+| location, address | JSONB |
+
+Custom type overrides:
+
+```python
+def custom_mapper(sf_type):
+    if sf_type == "string":
+        return "VARCHAR(255)"  # Limit string fields
+    return None  # Use default for other types
+
+create_table_from_describe(
+    table_name="sf_account",
+    sobject_type="Account",
+    fields=["Id", "Name"],
+    type_mapper=custom_mapper,
+    db_conn=conn,
+)
+```
+
+**Option 2: TEXT-only Tables (Quick)**
+
+Use `create_table_from_query()` for fast prototyping (all columns are TEXT):
+
+```python
+from sf_utils.db import get_connection, create_table_from_query
+
+conn = get_connection()
+
+# Create table from SOQL query (all TEXT columns)
+create_table_from_query(
+    table_name="sf_account",
+    soql_query="SELECT Id, Name, Industry FROM Account",
+    db_conn=conn,
+)
+# Creates: id TEXT PRIMARY KEY, name TEXT, industry TEXT
+```
+
+**When to use each:**
+
+| Scenario | Function | Reason |
+|----------|----------|--------|
+| Date filtering (`WHERE date >= '2024-01-01'`) | `create_table_from_describe` | Proper DATE type enables comparisons |
+| Numeric aggregations (`SUM(amount)`) | `create_table_from_describe` | NUMERIC type required for math |
+| Boolean filters (`WHERE active = true`) | `create_table_from_describe` | BOOLEAN type for logic |
+| Quick prototyping | `create_table_from_query` | Faster, no describe() API call |
+| Unknown field types | `create_table_from_query` | All TEXT, always works |
 
 ## Data Flow Pattern
 
@@ -664,6 +754,8 @@ sf-utils/
 │   └── crud_contact.py
 ├── projects/           # Your custom scripts (gitignored)
 │   └── .gitkeep
+├── soql/               # Your SOQL query files (gitignored)
+│   └── .gitkeep
 ├── scripts/            # Infrastructure setup
 │   ├── setup-db.sh
 │   └── setup-db.ps1
@@ -679,10 +771,14 @@ sf-utils/
 | `sf_utils/` | Library code - import from here, don't modify | Yes |
 | `examples/` | Sample scripts showing common patterns | Yes |
 | `projects/` | **Your custom scripts and projects** | No (gitignored) |
+| `soql/` | **Your SOQL query files** | No (gitignored) |
 | `scripts/` | Infrastructure setup (Docker, DB) | Yes |
 
 **Getting started:**
 ```bash
+# Create a SOQL query file
+echo "SELECT Id, Name, Industry FROM Account" > soql/accounts.soql
+
 # Copy an example as a starting point
 cp examples/query_accounts.py projects/my_report.py
 
