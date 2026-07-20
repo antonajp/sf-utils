@@ -13,7 +13,7 @@ from typing import Optional
 
 import click
 
-from sf_utils.client import SalesforceConfig, get_client
+from sf_utils.client import get_client
 from sf_utils.sync import SyncMode, sync
 from sf_utils.sync.config import SyncJobConfig, load_sync_config
 from sf_utils.sync.rest_sync import SyncResult
@@ -163,22 +163,17 @@ def _execute_sync(
             date_field=job_config.date_field,
         )
 
-    # Load credentials from environment
+    # Create Salesforce client (auto-detects JWT vs password auth)
     try:
-        logger.debug("Loading Salesforce credentials from environment")
-        config = SalesforceConfig.from_env()
+        logger.debug("Creating Salesforce client (auto-detecting auth method)")
+        client = get_client()
     except ValueError as e:
         logger.error("Missing Salesforce credentials: %s", e)
         raise click.ClickException(
             f"Missing Salesforce credentials: {e}\n"
-            f"Required environment variables: SF_USERNAME, SF_PASSWORD, "
-            f"SF_CLIENT_ID, SF_CLIENT_SECRET"
+            f"For JWT auth: SF_USERNAME, SF_CLIENT_ID, SF_PRIVATE_KEY_PATH\n"
+            f"For password auth: SF_USERNAME, SF_PASSWORD, SF_CLIENT_ID, SF_CLIENT_SECRET"
         ) from e
-
-    # Create Salesforce client
-    try:
-        logger.debug("Creating Salesforce client")
-        client = get_client(config)
     except Exception as e:
         logger.error("Failed to create Salesforce client: %s", e)
         raise click.ClickException(f"Failed to authenticate with Salesforce: {e}") from e
@@ -346,9 +341,9 @@ def sync_cmd(
         sf-sync sync --verbose Account
 
     Credentials are loaded from environment variables:
-        SF_USERNAME, SF_PASSWORD, SF_CLIENT_ID, SF_CLIENT_SECRET
-        SF_SANDBOX (optional, default: false)
-        SF_API_VERSION (optional, default: v61.0)
+        JWT auth: SF_USERNAME, SF_CLIENT_ID, SF_PRIVATE_KEY_PATH
+        Password auth: SF_USERNAME, SF_PASSWORD, SF_CLIENT_ID, SF_CLIENT_SECRET
+        Optional: SF_SANDBOX (default: false), SF_API_VERSION (default: v61.0)
 
     Exit codes:
         0 - Success
