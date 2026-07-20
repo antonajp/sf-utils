@@ -1312,6 +1312,498 @@ class TestPollBulkJobConfig:
         # Verify get_client was called
         mock_get_client.assert_called_once()
         assert result["state"] == "JobComplete"
+
+
+# ============================================================================
+# Sync Records Bulk Tests
+# ============================================================================
+
+
+class TestSyncRecordsBulkSuccess:
+    """Tests for successful sync_records_bulk() execution."""
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_successful_sync_returns_result(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should execute full sync flow and return SyncResult."""
+        # Mock client
+        mock_client = Mock()
+        mock_get_client.return_value = mock_client
+
+        # Mock DB connection
+        mock_conn = Mock()
+        mock_get_conn.return_value = mock_conn
+
+        # Mock job creation
+        mock_create_job.return_value = "750xx0000004567AAA"
+
+        # Mock polling
+        mock_poll.return_value = {
+            "id": "750xx0000004567AAA",
+            "state": "JobComplete",
+            "numberRecordsProcessed": 1000
+        }
+
+        # Mock results (2 batches)
+        batch1 = [{"Id": "001xxx", "Name": "Account1"}] * 500
+        batch2 = [{"Id": "002xxx", "Name": "Account2"}] * 500
+        mock_get_results.return_value = iter([batch1, batch2])
+
+        # Mock sync state (no previous sync)
+        mock_get_state.return_value = None
+
+        # Mock upsert - called once per batch, returns (inserted, updated) per batch
+        # Batch 1: 400 inserted, 100 updated
+        # Batch 2: 400 inserted, 100 updated
+        # Total: 800 inserted, 200 updated
+        mock_upsert.side_effect = [(400, 100), (400, 100)]
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        result = sync_records_bulk(
+            soql="SELECT Id, Name FROM Account",
+            object_name="Account"
+        )
+
+        # Verify result
+        assert result.object_name == "Account"
+        assert result.records_fetched == 1000
+        assert result.records_inserted == 800
+        assert result.records_updated == 200
+        assert result.sync_mode == "incremental"
+        assert result.date_field == "LastModifiedDate"
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_returns_sync_result_with_correct_counts(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should return correct record counts from upsert operation."""
+        # Mock all dependencies
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"id": "750xx0000004567AAA", "state": "JobComplete", "numberRecordsProcessed": 150}
+
+        batch = [{"Id": f"00{i}xxx", "Name": f"Rec{i}"} for i in range(150)]
+        mock_get_results.return_value = iter([batch])
+        mock_get_state.return_value = None
+
+        # Upsert returns specific counts
+        mock_upsert.return_value = (100, 50)  # 100 inserted, 50 updated
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        result = sync_records_bulk(
+            soql="SELECT Id, Name FROM Contact",
+            object_name="Contact"
+        )
+
+        # Verify counts match upsert return
+        assert result.records_fetched == 150
+        assert result.records_inserted == 100
+        assert result.records_updated == 50
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_updates_watermark_on_success(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should call update_sync_state() after successful upsert."""
+        # Mock all dependencies
+        mock_get_client.return_value = Mock()
+        mock_conn = Mock()
+        mock_get_conn.return_value = mock_conn
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"id": "750xx0000004567AAA", "state": "JobComplete", "numberRecordsProcessed": 10}
+
+        batch = [{"Id": f"00{i}xxx", "Name": f"Rec{i}"} for i in range(10)]
+        mock_get_results.return_value = iter([batch])
+        mock_get_state.return_value = None
+        mock_upsert.return_value = (8, 2)
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        result = sync_records_bulk(
+            soql="SELECT Id, Name FROM Lead",
+            object_name="Lead"
+        )
+
+        # Verify update_sync_state was called
+        mock_update_state.assert_called_once()
+        call_args = mock_update_state.call_args[1]
+        assert call_args["object_name"] == "Lead"
+        assert call_args["db_conn"] == mock_conn
+        assert "timestamp" in call_args
+
+        # Verify commit was called
+        mock_conn.commit.assert_called_once()
+
+
+class TestSyncRecordsBulkWatermark:
+    """Tests for watermark injection and filtering."""
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_injects_watermark_into_soql(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should inject watermark filter when previous sync exists."""
+        from datetime import datetime, timezone
+        from sf_utils.sync.state import SyncStateRow
+
+        # Mock all dependencies
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_poll.return_value = {"id": "750xx0000004567AAA", "state": "JobComplete", "numberRecordsProcessed": 0}
+        mock_get_results.return_value = iter([])
+
+        # Mock sync state with previous watermark
+        previous_watermark = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        mock_get_state.return_value = SyncStateRow(
+            object_name="Account",
+            last_sync_timestamp=previous_watermark,
+            sync_mode="incremental"
+        )
+
+        mock_upsert.return_value = (0, 0)
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        sync_records_bulk(
+            soql="SELECT Id, Name FROM Account WHERE Industry = 'Technology'",
+            object_name="Account"
+        )
+
+        # Verify create_bulk_query_job was called with modified SOQL
+        mock_create_job.assert_called_once()
+        call_args = mock_create_job.call_args[1]
+        modified_soql = call_args["soql_query"]
+
+        # Verify watermark filter was injected
+        assert "LastModifiedDate >= 2024-01-01T00:00:00Z" in modified_soql
+        # Verify original WHERE clause preserved
+        assert "Industry = 'Technology'" in modified_soql
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_no_watermark_for_new_sync(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should not inject watermark when no previous sync exists."""
+        # Mock all dependencies
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_poll.return_value = {"id": "750xx0000004567AAA", "state": "JobComplete", "numberRecordsProcessed": 0}
+        mock_get_results.return_value = iter([])
+
+        # No previous sync state
+        mock_get_state.return_value = None
+        mock_upsert.return_value = (0, 0)
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        original_soql = "SELECT Id, Name FROM Contact"
+        sync_records_bulk(
+            soql=original_soql,
+            object_name="Contact"
+        )
+
+        # Verify create_bulk_query_job was called with unmodified SOQL
+        mock_create_job.assert_called_once()
+        call_args = mock_create_job.call_args[1]
+        modified_soql = call_args["soql_query"]
+
+        # SOQL should be unchanged (no watermark filter)
+        assert modified_soql == original_soql
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_does_not_update_watermark_on_failure(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should rollback and not update watermark when upsert fails."""
+        # Mock all dependencies
+        mock_get_client.return_value = Mock()
+        mock_conn = Mock()
+        mock_get_conn.return_value = mock_conn
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"id": "750xx0000004567AAA", "state": "JobComplete", "numberRecordsProcessed": 10}
+
+        batch = [{"Id": f"00{i}xxx", "Name": f"Rec{i}"} for i in range(10)]
+        mock_get_results.return_value = iter([batch])
+        mock_get_state.return_value = None
+
+        # Upsert raises error
+        mock_upsert.side_effect = Exception("Database error")
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        with pytest.raises(Exception, match="Database error"):
+            sync_records_bulk(
+                soql="SELECT Id, Name FROM Opportunity",
+                object_name="Opportunity"
+            )
+
+        # Verify watermark was NOT updated
+        mock_update_state.assert_not_called()
+
+        # Verify rollback was called
+        mock_conn.rollback.assert_called_once()
+
+
+class TestSyncRecordsBulkIntegration:
+    """Tests for full orchestration flow."""
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_orchestrates_full_flow(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should call all component functions in correct order."""
+        # Mock all dependencies
+        mock_client = Mock()
+        mock_get_client.return_value = mock_client
+
+        mock_conn = Mock()
+        mock_get_conn.return_value = mock_conn
+
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"id": "750xx0000004567AAA", "state": "JobComplete", "numberRecordsProcessed": 100}
+
+        batch = [{"Id": f"00{i}xxx", "Name": f"Rec{i}"} for i in range(100)]
+        mock_get_results.return_value = iter([batch])
+        mock_get_state.return_value = None
+        mock_upsert.return_value = (80, 20)
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        result = sync_records_bulk(
+            soql="SELECT Id, Name FROM Account",
+            object_name="Account"
+        )
+
+        # Verify call sequence
+        # 1. Ensure sync state table exists
+        mock_ensure_table.assert_called_once_with(mock_conn)
+
+        # 2. Get sync state
+        mock_get_state.assert_called_once_with(object_name="Account", db_conn=mock_conn)
+
+        # 3. Create bulk job
+        mock_create_job.assert_called_once()
+        assert mock_create_job.call_args[1]["sobject_type"] == "Account"
+        assert mock_create_job.call_args[1]["client"] == mock_client
+
+        # 4. Poll job
+        mock_poll.assert_called_once()
+        assert mock_poll.call_args[1]["job_id"] == "750xx0000004567AAA"
+        assert mock_poll.call_args[1]["client"] == mock_client
+
+        # 5. Get results
+        mock_get_results.assert_called_once()
+        assert mock_get_results.call_args[1]["job_id"] == "750xx0000004567AAA"
+        assert mock_get_results.call_args[1]["client"] == mock_client
+
+        # 6. Create table
+        mock_create_table.assert_called_once()
+        assert mock_create_table.call_args[1]["table_name"] == "sf_account"
+        assert mock_create_table.call_args[1]["db_conn"] == mock_conn
+
+        # 7. Upsert records
+        mock_upsert.assert_called_once()
+        assert mock_upsert.call_args[1]["table_name"] == "sf_account"
+        assert len(mock_upsert.call_args[1]["records"]) == 100
+        assert mock_upsert.call_args[1]["connection"] == mock_conn
+
+        # 8. Update sync state
+        mock_update_state.assert_called_once()
+        assert mock_update_state.call_args[1]["object_name"] == "Account"
+
+        # 9. Commit
+        mock_conn.commit.assert_called_once()
+
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_creates_client_and_db_if_none(
+        self,
+        mock_get_client,
+        mock_create_job,
+        mock_poll,
+        mock_get_results,
+        mock_get_conn,
+        mock_ensure_table,
+        mock_get_state,
+        mock_update_state,
+        mock_create_table,
+        mock_upsert
+    ):
+        """Should create client and DB connection when not provided."""
+        # Mock all dependencies
+        mock_client = Mock()
+        mock_get_client.return_value = mock_client
+
+        mock_conn = Mock()
+        mock_get_conn.return_value = mock_conn
+
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"id": "750xx0000004567AAA", "state": "JobComplete", "numberRecordsProcessed": 0}
+        mock_get_results.return_value = iter([])
+        mock_get_state.return_value = None
+        mock_upsert.return_value = (0, 0)
+
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        # Call without client or db_conn
+        result = sync_records_bulk(
+            soql="SELECT Id, Name FROM Case",
+            object_name="Case"
+        )
+
+        # Verify get_client was called
+        mock_get_client.assert_called_once()
+
+        # Verify get_connection was called
+        mock_get_conn.assert_called_once()
+
+        # Verify connection was closed at end (owns_db_conn=True)
+        mock_conn.close.assert_called_once()
 # ============================================================================
 # Get Bulk Results Tests
 # ============================================================================
