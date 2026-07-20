@@ -102,14 +102,23 @@ openssl genrsa -out server.key 2048
 openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/CN=sf-utils"
 ```
 
-Windows PowerShell (requires OpenSSL installed, e.g., via Git for Windows):
-```powershell
+Windows (use Git Bash, not PowerShell):
+
+OpenSSL is not included in Windows. The easiest option is to use **Git Bash** which comes with Git for Windows and includes OpenSSL:
+
+1. Install [Git for Windows](https://git-scm.com/download/win) if not already installed
+2. Open **Git Bash** (not PowerShell or Command Prompt)
+3. Run the same commands:
+
+```bash
 # Generate 2048-bit RSA private key
 openssl genrsa -out server.key 2048
 
 # Generate self-signed X.509 certificate (valid 1 year)
 openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/CN=sf-utils"
 ```
+
+> **Tip**: Store your key in a persistent location like `C:\Users\YourName\.ssh\server.key` and reference that path in `SF_PRIVATE_KEY_PATH`.
 
 **Step 2: Create Connected App in Salesforce**
 
