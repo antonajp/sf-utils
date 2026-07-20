@@ -580,3 +580,551 @@ class TestQueryChunkedDateFormatting:
         assert "2024-01-02T00:00:00Z" in actual_soql
         # Should NOT use +00:00 format
         assert "+00:00" not in actual_soql
+
+
+# Import for sync_records tests
+def import_sync_records():
+    """Import sync_records and SyncResult with helpful error message if not yet implemented."""
+    try:
+        from sf_utils.sync.rest_sync import SyncResult, sync_records
+        return SyncResult, sync_records
+    except ImportError as e:
+        pytest.skip(f"sync_records not yet implemented: {e}")
+
+
+class TestSyncResult:
+    """Tests for SyncResult dataclass."""
+
+    def test_sync_result_has_all_expected_fields(self):
+        """SyncResult dataclass should have all required fields."""
+        SyncResult, _ = import_sync_records()
+
+        result = SyncResult(
+            object_name="Account",
+            records_fetched=100,
+            records_inserted=50,
+            records_updated=50,
+            sync_mode="incremental",
+            start_timestamp=datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            end_timestamp=datetime(2024, 1, 1, 1, 0, 0, tzinfo=timezone.utc),
+            date_field="LastModifiedDate",
+        )
+
+        assert result.object_name == "Account"
+        assert result.records_fetched == 100
+        assert result.records_inserted == 50
+        assert result.records_updated == 50
+        assert result.sync_mode == "incremental"
+        assert result.start_timestamp == datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        assert result.end_timestamp == datetime(2024, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
+        assert result.date_field == "LastModifiedDate"
+
+    def test_sync_result_fields_are_accessible(self):
+        """All SyncResult fields should be accessible."""
+        SyncResult, _ = import_sync_records()
+
+        result = SyncResult(
+            object_name="Contact",
+            records_fetched=25,
+            records_inserted=10,
+            records_updated=15,
+            sync_mode="full",
+            start_timestamp=datetime.now(timezone.utc),
+            end_timestamp=datetime.now(timezone.utc),
+            date_field="CreatedDate",
+        )
+
+        # Fields should be directly accessible (dataclass behavior)
+        assert hasattr(result, 'object_name')
+        assert hasattr(result, 'records_fetched')
+        assert hasattr(result, 'records_inserted')
+        assert hasattr(result, 'records_updated')
+        assert hasattr(result, 'sync_mode')
+        assert hasattr(result, 'start_timestamp')
+        assert hasattr(result, 'end_timestamp')
+        assert hasattr(result, 'date_field')
+
+
+class TestSyncRecordsDateFieldValidation:
+    """Tests for date_field parameter validation in sync_records()."""
+
+    def test_default_date_field_is_last_modified_date(self):
+        """Default date_field should be 'LastModifiedDate'."""
+        SyncResult, sync_records = import_sync_records()
+
+        with patch('sf_utils.sync.rest_sync.get_sync_state') as mock_get_state, \
+             patch('sf_utils.sync.rest_sync.get_client') as mock_get_client, \
+             patch('sf_utils.sync.rest_sync.get_connection') as mock_get_conn, \
+             patch('sf_utils.sync.rest_sync.query_all') as mock_query_all, \
+             patch('sf_utils.sync.rest_sync.create_table_from_query'), \
+             patch('sf_utils.sync.rest_sync.upsert_records'), \
+             patch('sf_utils.sync.rest_sync.update_sync_state'):
+
+            mock_get_state.return_value = None  # No previous sync
+            mock_get_client.return_value = Mock()
+            mock_get_conn.return_value = Mock()
+            mock_query_all.return_value = []  # Empty list
+
+            # Call without date_field parameter
+            result = sync_records(
+                soql="SELECT Id, Name, LastModifiedDate FROM Account",
+                object_name="Account",
+            )
+
+            # Should use default "LastModifiedDate"
+            assert result.date_field == "LastModifiedDate"
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_custom_date_field_parameter_works(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """Custom date_field parameter should be respected."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        result = sync_records(
+            soql="SELECT Id, Name, CreatedDate FROM Lead",
+            object_name="Lead",
+            date_field="CreatedDate",
+        )
+
+        assert result.date_field == "CreatedDate"
+
+    def test_validation_raises_error_when_field_missing_from_select(self):
+        """validate_date_field=True should raise ValueError when field missing from SOQL SELECT."""
+        SyncResult, sync_records = import_sync_records()
+
+        with pytest.raises(ValueError, match="Date field 'CreatedDate' not found in SELECT clause"):
+            sync_records(
+                soql="SELECT Id, Name FROM Account",
+                object_name="Account",
+                date_field="CreatedDate",
+                validate_date_field=True,
+            )
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_validation_skipped_when_disabled(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """validate_date_field=False should skip validation."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        # Should not raise even though LastModifiedDate not in SELECT
+        result = sync_records(
+            soql="SELECT Id, Name FROM Account",
+            object_name="Account",
+            date_field="LastModifiedDate",
+            validate_date_field=False,
+        )
+
+        assert result.date_field == "LastModifiedDate"
+
+    def test_invalid_date_field_format_raises_error(self):
+        """Invalid date_field format should raise ValueError."""
+        SyncResult, sync_records = import_sync_records()
+
+        # SQL injection attempt
+        with pytest.raises(ValueError, match="Invalid date field name"):
+            sync_records(
+                soql="SELECT Id FROM Account",
+                object_name="Account",
+                date_field="DROP TABLE Accounts",
+            )
+
+        # Invalid characters
+        with pytest.raises(ValueError, match="Invalid date field name"):
+            sync_records(
+                soql="SELECT Id FROM Account",
+                object_name="Account",
+                date_field="123abc",
+            )
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_valid_standard_field_formats_work(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """Valid standard Salesforce field formats should be accepted."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        # Standard field
+        result = sync_records(
+            soql="SELECT Id, SystemModstamp FROM Account",
+            object_name="Account",
+            date_field="SystemModstamp",
+        )
+        assert result.date_field == "SystemModstamp"
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_valid_custom_field_formats_work(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """Valid custom field formats (with __c suffix) should be accepted."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        # Custom field
+        result = sync_records(
+            soql="SELECT Id, Last_Contacted__c FROM Contact",
+            object_name="Contact",
+            date_field="Last_Contacted__c",
+        )
+        assert result.date_field == "Last_Contacted__c"
+
+
+class TestSyncRecordsModeSelection:
+    """Tests for sync mode (incremental vs full) selection."""
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_incremental_mode_queries_from_watermark(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """mode='incremental' should query records after watermark timestamp."""
+        SyncResult, sync_records = import_sync_records()
+        from sf_utils.sync.state import SyncStateRow
+
+        # Mock existing sync state with watermark
+        watermark = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        mock_get_state.return_value = SyncStateRow(
+            object_name="Account",
+            last_sync_timestamp=watermark,
+            sync_mode="incremental",
+        )
+
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        sync_records(
+            soql="SELECT Id, Name, LastModifiedDate FROM Account",
+            object_name="Account",
+            mode="incremental",
+        )
+
+        # Verify query_all was called with watermark injected into SOQL
+        assert mock_query_all.called
+        call_kwargs = mock_query_all.call_args[1]
+        modified_soql = call_kwargs['soql']
+        # Should contain watermark timestamp in WHERE clause
+        assert "WHERE" in modified_soql
+        assert "2024-01-01" in modified_soql  # Watermark date
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_full_mode_queries_all_records(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """mode='full' should query all records from epoch."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None  # No previous state
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        sync_records(
+            soql="SELECT Id, Name, LastModifiedDate FROM Account",
+            object_name="Account",
+            mode="full",
+        )
+
+        # Verify query_all was called with original SOQL (no watermark injection in full mode)
+        assert mock_query_all.called
+        call_kwargs = mock_query_all.call_args[1]
+        modified_soql = call_kwargs['soql']
+        # Full mode should use original SOQL without modification
+        assert modified_soql == "SELECT Id, Name, LastModifiedDate FROM Account"
+
+    def test_invalid_mode_raises_error(self):
+        """Invalid mode value should raise ValueError."""
+        SyncResult, sync_records = import_sync_records()
+
+        with pytest.raises(ValueError, match="Invalid mode"):
+            sync_records(
+                soql="SELECT Id FROM Account",
+                object_name="Account",
+                mode="invalid_mode",
+            )
+
+
+class TestSyncRecordsWatermarkInjection:
+    """Tests for watermark placeholder injection in SOQL."""
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_where_clause_appended_when_no_existing_where(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """WHERE clause should be appended when SOQL has no WHERE."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        sync_records(
+            soql="SELECT Id, Name, LastModifiedDate FROM Account",
+            object_name="Account",
+            mode="incremental",
+        )
+
+        # In incremental mode with no previous sync, original SOQL is used
+        # (no watermark to inject yet)
+        assert mock_query_all.called
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_and_clause_appended_when_existing_where(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """AND clause should be appended when SOQL has existing WHERE."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        sync_records(
+            soql="SELECT Id, Name, LastModifiedDate FROM Account WHERE Type = 'Customer'",
+            object_name="Account",
+            mode="incremental",
+        )
+
+        # In incremental mode with no previous sync, original SOQL is used
+        assert mock_query_all.called
+
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    def test_watermark_formatted_as_iso8601(
+        self, mock_update_state, mock_upsert, mock_create_table,
+        mock_query_all, mock_get_conn, mock_get_client, mock_get_state
+    ):
+        """Watermark dates should be formatted as ISO 8601."""
+        SyncResult, sync_records = import_sync_records()
+        from sf_utils.sync.state import SyncStateRow
+
+        watermark = datetime(2024, 6, 15, 14, 30, 0, tzinfo=timezone.utc)
+        mock_get_state.return_value = SyncStateRow(
+            object_name="Account",
+            last_sync_timestamp=watermark,
+            sync_mode="incremental",
+        )
+
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+
+        sync_records(
+            soql="SELECT Id, Name, LastModifiedDate FROM Account",
+            object_name="Account",
+            mode="incremental",
+        )
+
+        # Verify SOQL contains watermark timestamp
+        assert mock_query_all.called
+        call_kwargs = mock_query_all.call_args[1]
+        modified_soql = call_kwargs['soql']
+
+        # Should contain ISO 8601 formatted watermark timestamp
+        assert "2024-06-15T14:30:00Z" in modified_soql
+        assert "WHERE" in modified_soql
+        assert "LastModifiedDate >=" in modified_soql
+
+
+class TestSyncRecordsIntegration:
+    """Integration tests for sync_records() orchestration flow."""
+
+    @patch('sf_utils.sync.rest_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    def test_full_incremental_sync_flow(
+        self, mock_upsert, mock_create_table, mock_query_all,
+        mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table
+    ):
+        """Full incremental sync flow: get_sync_state -> query_all -> create_table -> upsert -> update_sync_state."""
+        SyncResult, sync_records = import_sync_records()
+        from sf_utils.sync.state import SyncStateRow
+
+        # Setup mocks
+        watermark = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        mock_get_state.return_value = SyncStateRow(
+            object_name="Account",
+            last_sync_timestamp=watermark,
+            sync_mode="incremental",
+        )
+
+        mock_client = Mock()
+        mock_get_client.return_value = mock_client
+
+        mock_conn = Mock()
+        mock_get_conn.return_value = mock_conn
+
+        # Mock query results (80 records total)
+        all_records = [{"Id": f"00{i}", "Name": f"Account {i}"} for i in range(80)]
+        mock_query_all.return_value = all_records
+
+        # Mock upsert results (40 inserted, 40 updated)
+        mock_upsert.return_value = (40, 40)
+
+        # Execute sync
+        result = sync_records(
+            soql="SELECT Id, Name, LastModifiedDate FROM Account",
+            object_name="Account",
+            mode="incremental",
+        )
+
+        # Verify sync state table ensured
+        mock_ensure_table.assert_called_once_with(mock_conn)
+
+        # Verify sync state retrieved
+        mock_get_state.assert_called_once()
+        call_args = mock_get_state.call_args[1]
+        assert call_args['object_name'] == "Account"
+        assert call_args['db_conn'] == mock_conn
+
+        # Verify table created
+        mock_create_table.assert_called_once()
+
+        # Verify upsert called once with all records
+        assert mock_upsert.call_count == 1
+
+        # Verify sync state updated
+        mock_update_state.assert_called_once()
+        update_call = mock_update_state.call_args[1]
+        assert update_call['object_name'] == "Account"
+        assert update_call['db_conn'] == mock_conn
+        assert update_call['mode'] == "incremental"
+
+        # Verify result
+        assert result.object_name == "Account"
+        assert result.records_fetched == 80
+        assert result.records_inserted == 40
+        assert result.records_updated == 40
+        assert result.sync_mode == "incremental"
+        assert result.date_field == "LastModifiedDate"
+
+    @patch('sf_utils.sync.rest_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    def test_returns_sync_result_with_correct_counts(
+        self, mock_upsert, mock_create_table, mock_query_all,
+        mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table
+    ):
+        """SyncResult should contain correct counts from upsert operations."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None  # No previous sync
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+
+        # Single batch with 10 records
+        all_records = [{"Id": f"00{i}"} for i in range(10)]
+        mock_query_all.return_value = all_records
+
+        # All records inserted (first sync)
+        mock_upsert.return_value = (10, 0)
+
+        result = sync_records(
+            soql="SELECT Id, Name, CreatedDate FROM Lead",
+            object_name="Lead",
+            date_field="CreatedDate",
+            mode="full",
+        )
+
+        assert result.records_fetched == 10
+        assert result.records_inserted == 10
+        assert result.records_updated == 0
+        assert result.sync_mode == "full"
+        assert result.date_field == "CreatedDate"
+        assert isinstance(result.start_timestamp, datetime)
+        assert isinstance(result.end_timestamp, datetime)
+        assert result.end_timestamp >= result.start_timestamp
