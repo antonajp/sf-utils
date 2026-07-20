@@ -202,6 +202,239 @@ fields = [f["name"] for f in metadata["fields"]]
 3. **Export**: Generate Excel or CSV reports locally
 4. **Distribute** (optional, user-initiated): Share via corporate email, Slack, etc.
 
+## Data Sync
+
+The sync system enables you to synchronize Salesforce data to a local PostgreSQL database using either REST API or Bulk API 2.0. Syncs are configured declaratively using YAML files.
+
+### Quick Start
+
+Get started in 5 steps:
+
+**1. Set up environment variables** (see Configuration section above)
+
+**2. Create a SOQL template** at `soql/account.soql`:
+
+```sql
+SELECT Id, Name, Industry, LastModifiedDate
+FROM Account
+WHERE LastModifiedDate >= {start_date}
+  AND LastModifiedDate < {end_date}
+```
+
+**3. Create a sync configuration** at `sync_config.yaml`:
+
+```yaml
+syncs:
+  - object_name: Account
+    soql_file: soql/account.soql
+    date_field: LastModifiedDate
+    chunk_size: daily
+    mode: auto
+    enabled: true
+```
+
+**4. Install the CLI:**
+
+```bash
+pip install -e .
+```
+
+**5. Run your first sync:**
+
+```bash
+sf-sync sync Account
+```
+
+### CLI Commands
+
+The `sf-sync` command provides three main operations:
+
+```bash
+# Sync a single object
+sf-sync sync Account
+
+# Sync all enabled objects from config
+sf-sync sync --all
+
+# Preview sync without executing
+sf-sync sync --dry-run Account
+
+# Force specific API mode
+sf-sync sync --mode bulk Account    # Use Bulk API 2.0
+sf-sync sync --mode rest Account    # Use REST API
+sf-sync sync --mode auto Account    # Auto-detect (default)
+
+# Use custom config file
+sf-sync sync --config ./my_config.yaml Account
+
+# Enable debug logging
+sf-sync sync --verbose Account
+
+# Check sync status
+sf-sync status                      # Table format
+sf-sync status --json               # JSON format
+```
+
+### SOQL Templates
+
+SOQL templates support placeholders for incremental syncs:
+
+| Placeholder | Description |
+|-------------|-------------|
+| `{start_date}` | Start of date range (ISO 8601) |
+| `{end_date}` | End of date range (ISO 8601) |
+| `{watermark}` | Last sync timestamp |
+
+**Example templates:**
+
+Account template (`soql/account.soql`):
+```sql
+SELECT Id, Name, Industry, Type, CreatedDate, LastModifiedDate
+FROM Account
+WHERE LastModifiedDate >= {start_date}
+  AND LastModifiedDate < {end_date}
+```
+
+Contact template (`soql/contact.soql`):
+```sql
+SELECT Id, FirstName, LastName, Email, AccountId, LastModifiedDate
+FROM Contact
+WHERE LastModifiedDate >= {start_date}
+  AND LastModifiedDate < {end_date}
+```
+
+Opportunity template (`soql/opportunity.soql`):
+```sql
+SELECT Id, Name, StageName, Amount, CloseDate, AccountId, LastModifiedDate
+FROM Opportunity
+WHERE LastModifiedDate >= {start_date}
+  AND LastModifiedDate < {end_date}
+```
+
+### Sync Configuration
+
+Define sync jobs in `sync_config.yaml`:
+
+```yaml
+syncs:
+  # Required fields
+  - object_name: Account              # Salesforce object name
+    soql_file: soql/account.soql      # Path to SOQL template
+    date_field: LastModifiedDate      # Date field for incremental sync
+
+    # Optional fields (defaults shown)
+    chunk_size: daily                 # hourly, daily, weekly, monthly, none
+    mode: auto                        # auto, rest, bulk
+    enabled: true                     # Include in --all sync
+
+  - object_name: Contact
+    soql_file: soql/contact.soql
+    date_field: LastModifiedDate
+    chunk_size: weekly
+    mode: bulk                        # Force Bulk API
+    enabled: true
+
+  - object_name: Opportunity
+    soql_file: soql/opportunity.soql
+    date_field: LastModifiedDate
+    enabled: false                    # Excluded from --all
+```
+
+**Configuration Options:**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `object_name` | Yes | - | Salesforce object name (e.g., Account, Contact) |
+| `soql_file` | Yes | - | Path to SOQL template file |
+| `date_field` | Yes | - | Date/datetime field for incremental sync tracking |
+| `chunk_size` | No | daily | Time interval for chunking queries |
+| `mode` | No | auto | API mode: auto, rest, or bulk |
+| `enabled` | No | true | Whether to include in `--all` sync |
+
+### REST vs Bulk API Mode Selection
+
+| Scenario | Recommended Mode | Reason |
+|----------|------------------|--------|
+| < 10,000 records | REST (`rest`) | Lower latency, simpler |
+| > 10,000 records | Bulk (`bulk`) | Avoids API limits, handles large datasets |
+| Unknown size | Auto (`auto`) | Queries count first, then chooses |
+
+**Auto mode behavior:**
+1. Runs `SELECT COUNT() FROM {object}` to get record count
+2. If count < 10,000, uses REST API
+3. If count >= 10,000, uses Bulk API 2.0
+
+### Programmatic Usage
+
+```python
+from sf_utils.sync import sync, SyncMode
+from sf_utils.sync.config import load_sync_config
+
+# Load sync jobs from config
+configs = load_sync_config("sync_config.yaml")
+
+for config in configs:
+    if config.enabled:
+        result = sync(
+            soql="SELECT Id, Name FROM " + config.object_name,
+            object_name=config.object_name,
+            mode=SyncMode.AUTO,
+            date_field=config.date_field,
+        )
+        print(f"Synced {result.records_fetched} records from {config.object_name}")
+```
+
+### Cross-Platform Support
+
+The CLI works consistently on Linux, macOS, and Windows:
+
+| Platform | Terminal | Example |
+|----------|----------|---------|
+| Linux | bash/zsh | `sf-sync sync Account` |
+| macOS | bash/zsh/Terminal | `sf-sync sync Account` |
+| Windows | PowerShell | `sf-sync sync Account` |
+| Windows | CMD | `sf-sync sync Account` |
+
+**Windows notes:**
+- Use PowerShell for best experience
+- Path separators in YAML files can be `/` or `\` (forward slash preferred)
+- Environment variables work identically
+
+### Troubleshooting
+
+**Common Issues:**
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Missing Salesforce credentials` | SF_* env vars not set | Check `.env` file and source it |
+| `Failed to connect to PostgreSQL` | Database not running | Run `docker start sf-utils-postgres` |
+| `Config file not found` | YAML path incorrect | Check `sync_config.yaml` exists |
+| `Object not found in config` | Object name not in YAML | Add object to `syncs:` list |
+| `SOQL file not found` | Bad path in config | Verify `soql_file` path |
+
+**Debug logging:**
+
+```bash
+# Enable verbose output
+sf-sync sync --verbose Account
+
+# Check sync status
+sf-sync status
+```
+
+**Reset sync state:**
+
+```sql
+-- Connect to PostgreSQL
+psql -h localhost -U postgres -d sf_utils
+
+-- View sync state
+SELECT * FROM sf_sync_state;
+
+-- Reset a specific object (force full sync next time)
+DELETE FROM sf_sync_state WHERE object_name = 'Account';
+```
+
 ## Development
 
 ### Run Tests
