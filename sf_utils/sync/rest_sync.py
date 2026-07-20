@@ -525,10 +525,15 @@ def sync_records(
         records_updated = 0
 
         if all_records:
+            # Normalize record keys to lowercase to match table column names
+            normalized_records = [
+                {k.lower(): v for k, v in record.items()}
+                for record in all_records
+            ]
             logger.info("Upserting %d records to %s", records_fetched, table_name)
             records_inserted, records_updated = upsert_records(
                 table_name=table_name,
-                records=all_records,
+                records=normalized_records,
                 connection=db_conn,
                 batch_size=500,
             )
