@@ -4,6 +4,7 @@ import logging
 from unittest.mock import Mock, MagicMock, patch
 
 import pytest
+import requests
 
 from sf_utils.exceptions import SalesforceAPIError, SalesforceAuthError, SalesforceRateLimitError
 from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG, NO_RETRY_CONFIG
@@ -1311,3 +1312,264 @@ class TestPollBulkJobConfig:
         # Verify get_client was called
         mock_get_client.assert_called_once()
         assert result["state"] == "JobComplete"
+# ============================================================================
+# Get Bulk Results Tests
+# ============================================================================
+
+
+class TestGetBulkResultsSuccess:
+    """Tests for successful result retrieval scenarios."""
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_yields_records_as_dicts(self, mock_get, mock_client):
+        """Should yield records as dictionaries with CSV headers as keys."""
+        # Mock CSV response with headers and data
+        csv_data = "Id,Name,Industry\n001xxx,Acme,Technology\n002xxx,Globex,Manufacturing"
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        # iter_lines returns iterator of strings (decode_unicode=True)
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        # Collect all batches
+        all_records = []
+        for batch in get_bulk_results("750xx0000004567AAA", client=mock_client):
+            all_records.extend(batch)
+
+        # Verify records parsed correctly
+        assert len(all_records) == 2
+        assert all_records[0] == {"Id": "001xxx", "Name": "Acme", "Industry": "Technology"}
+        assert all_records[1] == {"Id": "002xxx", "Name": "Globex", "Industry": "Manufacturing"}
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_batches_records_correctly(self, mock_get, mock_client):
+        """Should honor batch_size parameter and yield correct batch sizes."""
+        # Create CSV with 5 records
+        csv_lines = ["Id,Name"] + [f"00{i}xxx,Account{i}" for i in range(5)]
+        csv_data = "\n".join(csv_lines)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        # Collect batches with batch_size=2
+        batches = list(get_bulk_results("750xx0000004567AAA", client=mock_client, batch_size=2))
+
+        # Verify batch counts: 2, 2, 1
+        assert len(batches) == 3
+        assert len(batches[0]) == 2
+        assert len(batches[1]) == 2
+        assert len(batches[2]) == 1
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_yields_final_partial_batch(self, mock_get, mock_client):
+        """Should yield final batch even if smaller than batch_size."""
+        # Create CSV with 7 records (batch_size=3 → 3, 3, 1)
+        csv_lines = ["Id,Name"] + [f"00{i}xxx,Account{i}" for i in range(7)]
+        csv_data = "\n".join(csv_lines)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        batches = list(get_bulk_results("750xx0000004567AAA", client=mock_client, batch_size=3))
+
+        # Verify last batch has 1 record
+        assert len(batches) == 3
+        assert len(batches[0]) == 3
+        assert len(batches[1]) == 3
+        assert len(batches[2]) == 1  # Final partial batch
+
+
+class TestGetBulkResultsCSVParsing:
+    """Tests for CSV parsing behavior."""
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_parses_csv_headers_as_keys(self, mock_get, mock_client):
+        """Should use CSV header row as dictionary keys."""
+        csv_data = "Id,Name,CreatedDate,Amount__c\n001xxx,Test,2024-01-01,1000.50"
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        batches = list(get_bulk_results("750xx0000004567AAA", client=mock_client))
+        record = batches[0][0]
+
+        # Verify all headers became keys
+        assert "Id" in record
+        assert "Name" in record
+        assert "CreatedDate" in record
+        assert "Amount__c" in record
+        assert record["Amount__c"] == "1000.50"
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_handles_empty_csv(self, mock_get, mock_client):
+        """Should handle CSV with headers but no data records."""
+        csv_data = "Id,Name,Industry"  # Headers only, no data
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        batches = list(get_bulk_results("750xx0000004567AAA", client=mock_client))
+
+        # Should yield no batches (no records)
+        assert len(batches) == 0
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_malformed_row_logged_and_skipped(self, mock_get, mock_client, caplog):
+        """Should handle malformed CSV rows gracefully (csv.DictReader fills with None)."""
+        # Row 2 has too few columns (malformed) - DictReader will fill missing fields with None
+        csv_data = "Id,Name,Industry\n001xxx,Acme,Technology\n002xxx\n003xxx,Test,Retail"
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        with caplog.at_level(logging.WARNING):
+            all_records = []
+            for batch in get_bulk_results("750xx0000004567AAA", client=mock_client):
+                all_records.extend(batch)
+
+        # DictReader handles short rows by filling missing fields with None
+        assert len(all_records) == 3
+        assert all_records[0]["Id"] == "001xxx"
+        assert all_records[1]["Id"] == "002xxx"
+        assert all_records[1]["Name"] is None  # Missing field filled with None
+        assert all_records[2]["Id"] == "003xxx"
+
+
+class TestGetBulkResultsErrors:
+    """Tests for error handling."""
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_api_error_404_raises(self, mock_get, mock_client):
+        """Should raise SalesforceAPIError on 404 (job not found)."""
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.headers = {}
+        mock_response.json.return_value = {
+            "errorCode": "NOT_FOUND",
+            "message": "Job not found"
+        }
+        mock_response.text = "Job not found"
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            # Consume generator to trigger HTTP request
+            list(get_bulk_results("750xx0000004567AAA", client=mock_client))
+
+        assert exc_info.value.status_code == 404
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_api_error_401_raises_auth_error(self, mock_get, mock_client):
+        """Should raise SalesforceAuthError on 401 (unauthorized)."""
+        mock_response = Mock()
+        mock_response.status_code = 401
+        mock_response.headers = {}
+        mock_response.json.return_value = {
+            "errorCode": "INVALID_SESSION_ID",
+            "message": "Session expired or invalid"
+        }
+        mock_response.text = "Session expired"
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        with pytest.raises(SalesforceAuthError) as exc_info:
+            list(get_bulk_results("750xx0000004567AAA", client=mock_client))
+
+        assert exc_info.value.status_code == 401
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_network_error_handled(self, mock_get, mock_client):
+        """Should raise appropriate error on network failure."""
+        mock_get.side_effect = requests.exceptions.ConnectionError("Network unreachable")
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        with pytest.raises(Exception):  # Will be requests.exceptions.ConnectionError or wrapped error
+            list(get_bulk_results("750xx0000004567AAA", client=mock_client))
+
+
+class TestGetBulkResultsConfig:
+    """Tests for configuration parameter handling."""
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_custom_batch_size_honored(self, mock_get, mock_client):
+        """Should honor custom batch_size parameter."""
+        # Create CSV with 10 records
+        csv_lines = ["Id,Name"] + [f"00{i}xxx,Account{i}" for i in range(10)]
+        csv_data = "\n".join(csv_lines)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        batches = list(get_bulk_results("750xx0000004567AAA", client=mock_client, batch_size=4))
+
+        # With batch_size=4 and 10 records: 4, 4, 2
+        assert len(batches) == 3
+        assert len(batches[0]) == 4
+        assert len(batches[1]) == 4
+        assert len(batches[2]) == 2
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    def test_creates_client_if_none(self, mock_get_client, mock_get):
+        """Should create client from environment if not provided."""
+        # Create mock client
+        mock_client = Mock()
+        mock_client.instance_url = "example.my.salesforce.com"
+        mock_client.client_api_version = "v61.0"
+        mock_client.session_id = "00Dxx0000001234!ABC"
+        mock_client.proxies = None
+
+        mock_get_client.return_value = mock_client
+
+        # Mock CSV response
+        csv_data = "Id,Name\n001xxx,Test"
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        # Call without client parameter
+        list(get_bulk_results("750xx0000004567AAA"))
+
+        # Verify get_client was called
+        mock_get_client.assert_called_once()

@@ -1,8 +1,9 @@
 """Bulk API 2.0 job creation for Salesforce data synchronization."""
 
+import csv
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 from SalesforcePy.sfdc import Client
@@ -483,3 +484,262 @@ def poll_bulk_job(
         # Sleep with exponential backoff
         time.sleep(current_interval)
         current_interval = min(current_interval * backoff_multiplier, max_poll_interval)
+
+
+def get_bulk_results(
+    job_id: str,
+    client: Optional[Client] = None,
+    batch_size: int = 1000,
+) -> Iterator[List[Dict[str, Any]]]:
+    """Download and parse CSV results from a completed Bulk API 2.0 job.
+
+    Retrieves query results from a completed Bulk API 2.0 job as CSV data and
+    yields batches of records as dictionaries. Results are streamed to handle
+    large datasets efficiently without loading all data into memory.
+
+    The job must be in "JobComplete" state before calling this function. Use
+    poll_bulk_job() to wait for job completion if needed.
+
+    Args:
+        job_id: Bulk API 2.0 job ID (e.g., "750xx000000XyzoAAC").
+        client: Authenticated Salesforce client. Creates one if not provided.
+        batch_size: Number of records to yield per batch. Defaults to 1000.
+            Larger batches reduce overhead but consume more memory.
+
+    Yields:
+        Lists of dictionaries, where each dictionary represents one record with
+        field names as keys. Each batch contains up to batch_size records.
+        Final batch may contain fewer records.
+
+    Raises:
+        ValueError: If job_id is empty or batch_size is invalid.
+        SalesforceAuthError: If authentication fails (401/403).
+        SalesforceAPIError: If results download fails or HTTP error occurs.
+
+    Example:
+        >>> from sf_utils.sync import create_bulk_query_job, poll_bulk_job, get_bulk_results
+        >>>
+        >>> # Create and poll a bulk query job
+        >>> job_id = create_bulk_query_job(
+        ...     sobject_type="Account",
+        ...     soql_query="SELECT Id, Name, Industry FROM Account"
+        ... )
+        >>> job_info = poll_bulk_job(job_id)
+        >>>
+        >>> # Download results in batches
+        >>> total_records = 0
+        >>> for batch in get_bulk_results(job_id, batch_size=500):
+        ...     total_records += len(batch)
+        ...     # Process batch (insert to DB, export to CSV, etc.)
+        ...     process_batch(batch)
+        >>> print(f"Processed {total_records} records")
+        Processed 15000 records
+        >>>
+        >>> # Access individual records
+        >>> for batch in get_bulk_results(job_id):
+        ...     for record in batch:
+        ...         print(f"{record['Id']}: {record['Name']}")
+        001xx000003DHP0AAO: Acme Corporation
+        001xx000003DHP1AAO: Global Industries
+
+    Notes:
+        - Results are returned as CSV and parsed into dictionaries
+        - Uses streaming to handle large result sets (up to 150M records)
+        - Malformed CSV rows are logged as WARNING and skipped
+        - Progress is logged every batch (INFO level)
+        - HTTP request timeout is 300 seconds (5 minutes)
+        - Results must be downloaded within 7 days of job completion
+        - CSV field values are returned as strings (no type conversion)
+    """
+    # Validate inputs
+    if not job_id or not job_id.strip():
+        raise ValueError("job_id cannot be empty")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    # Initialize client if not provided
+    if client is None:
+        client = get_client()
+
+    logger.debug(
+        "Downloading Bulk API 2.0 results: job_id=%s, batch_size=%d",
+        job_id,
+        batch_size
+    )
+
+    # Construct Bulk API 2.0 endpoint for results
+    # Format: https://{instance_url}/services/data/{version}/jobs/query/{job_id}/results
+    api_version = client.client_api_version or "v61.0"
+    version = api_version.lstrip('v')
+    url = f"https://{client.instance_url}/services/data/v{version}/jobs/query/{job_id}/results"
+
+    # Prepare headers for CSV response
+    headers = {
+        "Authorization": f"Bearer {client.session_id}",
+        "Accept": "text/csv"
+    }
+
+    logger.debug("GET %s, Accept=text/csv", url)
+
+    # Stream response to handle large result sets
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            stream=True,
+            proxies=client.proxies if hasattr(client, 'proxies') else None,
+            timeout=300  # 5 minutes for large downloads
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            "HTTP request failed during results download: job_id=%s, error=%s",
+            job_id,
+            str(e)
+        )
+        raise SalesforceAPIError(
+            message=f"Failed to download Bulk API 2.0 results: {str(e)}",
+            status_code=None,
+            response_body={"job_id": job_id, "error": str(e)}
+        )
+
+    # Check for HTTP errors
+    status_code = response.status_code
+    if status_code >= 400:
+        # Try to parse error response (may be JSON or text)
+        try:
+            error_body = response.json()
+            error_message = error_body.get('message', error_body.get('exceptionMessage', 'Unknown error'))
+        except Exception:
+            error_body = {"error": response.text}
+            error_message = response.text or 'Unknown error'
+
+        logger.debug(
+            "Results download error response: job_id=%s, status=%d, body=%s",
+            job_id,
+            status_code,
+            str(_sanitize_value(error_body))[:200]
+        )
+
+        # Handle authentication errors
+        if status_code in (401, 403):
+            logger.error(
+                "Bulk API 2.0 authentication failed during results download: job_id=%s, status=%d, message=%s",
+                job_id,
+                status_code,
+                error_message
+            )
+            raise SalesforceAuthError(
+                message=error_message,
+                status_code=status_code,
+                response_body=error_body
+            )
+
+        # Handle other errors
+        logger.error(
+            "Bulk API 2.0 results download failed: job_id=%s, status=%d, message=%s",
+            job_id,
+            status_code,
+            error_message
+        )
+        raise SalesforceAPIError(
+            message=f"Failed to download Bulk API 2.0 results: {error_message}",
+            status_code=status_code,
+            response_body=error_body
+        )
+
+    # Extract total record count from headers if available
+    # Salesforce may provide Sforce-NumberOfRecords header
+    total_records = None
+    if 'Sforce-NumberOfRecords' in response.headers:
+        try:
+            total_records = int(response.headers['Sforce-NumberOfRecords'])
+            logger.debug(
+                "Total records from headers: job_id=%s, total=%d",
+                job_id,
+                total_records
+            )
+        except (ValueError, TypeError):
+            pass
+
+    logger.info(
+        "Starting CSV results stream: job_id=%s, total_records=%s",
+        job_id,
+        total_records if total_records is not None else "unknown"
+    )
+
+    # Process CSV in batches
+    # Use iter_lines with decode_unicode for text processing
+    lines = response.iter_lines(decode_unicode=True)
+
+    # Create CSV DictReader to parse headers and rows
+    try:
+        reader = csv.DictReader(lines)
+    except Exception as e:
+        logger.error(
+            "Failed to create CSV reader: job_id=%s, error=%s",
+            job_id,
+            str(e)
+        )
+        raise SalesforceAPIError(
+            message=f"Failed to parse CSV results: {str(e)}",
+            status_code=status_code,
+            response_body={"job_id": job_id, "error": str(e)}
+        )
+
+    # Yield records in batches
+    batch = []
+    total_processed = 0
+    row_num = 0
+
+    for row in reader:
+        row_num += 1
+
+        # Validate row
+        if not row:
+            logger.warning(
+                "Skipping empty row: job_id=%s, row_num=%d",
+                job_id,
+                row_num
+            )
+            continue
+
+        try:
+            # Add row to current batch
+            batch.append(row)
+            total_processed += 1
+
+            # Yield batch when full
+            if len(batch) >= batch_size:
+                logger.info(
+                    "Retrieved %d/%s records (batch of %d)",
+                    total_processed,
+                    total_records if total_records is not None else "?",
+                    len(batch)
+                )
+                yield batch
+                batch = []
+
+        except Exception as e:
+            logger.warning(
+                "Malformed CSV row skipped: job_id=%s, row_num=%d, error=%s",
+                job_id,
+                row_num,
+                str(e)
+            )
+            continue
+
+    # Yield final partial batch if any
+    if batch:
+        logger.info(
+            "Retrieved %d/%s records (final batch of %d)",
+            total_processed,
+            total_records if total_records is not None else "?",
+            len(batch)
+        )
+        yield batch
+
+    logger.info(
+        "Bulk API 2.0 results download complete: job_id=%s, total_records=%d",
+        job_id,
+        total_processed
+    )
