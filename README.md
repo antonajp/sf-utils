@@ -60,6 +60,120 @@ cp .env.example .env
 
 ### Salesforce Credentials
 
+This library supports two authentication methods. **JWT Bearer is recommended** for production and MFA-enabled orgs.
+
+| Scenario | Auth Method | Why |
+|----------|-------------|-----|
+| MFA-enabled org | JWT Bearer | Password flow blocked by MFA policies |
+| Phishing-resistant policies | JWT Bearer | Required for headless/server integrations |
+| Production integrations | JWT Bearer | More secure, no password storage |
+| CI/CD pipelines | JWT Bearer | Automated, no interactive login |
+| Development/testing (non-MFA) | Password | Simpler setup for local dev |
+
+**Auto-detection**: The library automatically selects the auth method based on environment variables:
+- If `SF_PRIVATE_KEY_PATH` is set → JWT Bearer flow
+- Otherwise → Password flow
+
+---
+
+#### JWT Bearer Flow (Recommended)
+
+Required for MFA-enabled orgs and phishing-resistant Connected Apps.
+
+**Environment Variables:**
+
+```env
+SF_USERNAME=your-username@example.com
+SF_CLIENT_ID=your-connected-app-client-id
+SF_PRIVATE_KEY_PATH=/path/to/server.key
+SF_PRIVATE_KEY_PASSPHRASE=your-passphrase   # optional, if key is encrypted
+SF_SANDBOX=false          # true for sandbox orgs
+SF_API_VERSION=v61.0      # optional
+```
+
+**Step 1: Generate RSA Key Pair**
+
+Linux / macOS:
+```bash
+# Generate 2048-bit RSA private key
+openssl genrsa -out server.key 2048
+
+# Generate self-signed X.509 certificate (valid 1 year)
+openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/CN=sf-utils"
+```
+
+Windows PowerShell (requires OpenSSL installed, e.g., via Git for Windows):
+```powershell
+# Generate 2048-bit RSA private key
+openssl genrsa -out server.key 2048
+
+# Generate self-signed X.509 certificate (valid 1 year)
+openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/CN=sf-utils"
+```
+
+**Step 2: Create Connected App in Salesforce**
+
+1. **Setup** → **Apps** → **App Manager** → **New Connected App**
+2. Fill in basic info:
+   - Connected App Name: `sf-utils` (or your choice)
+   - API Name: auto-generated
+   - Contact Email: your email
+3. **Enable OAuth Settings**:
+   - Callback URL: `https://localhost/callback` (not used for JWT, but required)
+   - **Enable for Device Flow**: unchecked
+   - **Selected OAuth Scopes**: Add these scopes:
+     - `Access and manage your data (api)`
+     - `Perform requests on your behalf at any time (refresh_token, offline_access)`
+4. **Use digital signatures**: ✅ Check this box
+5. **Upload the certificate**: Upload `server.crt` (the public key)
+6. Save and note the **Consumer Key** (this is your `SF_CLIENT_ID`)
+
+**Step 3: Configure OAuth Policies**
+
+1. After saving, click **Manage** on your Connected App
+2. Click **Edit Policies**
+3. Under **OAuth Policies**:
+   - **Permitted Users**: Select "Admin approved users are pre-authorized"
+   - **IP Relaxation**: Select "Relax IP restrictions" (for server-to-server)
+4. Save
+
+**Step 4: Pre-authorize Users**
+
+1. Go to **Setup** → **Connected Apps** → **Manage Connected Apps**
+2. Click on your Connected App
+3. Click **Manage Profiles** or **Manage Permission Sets**
+4. Add the profiles/permission sets for users who will authenticate via JWT
+
+> **Note**: Unlike password flow, JWT Bearer requires explicit pre-authorization. Users not in the approved profiles/permission sets cannot authenticate.
+
+**Step 5: Configure Environment**
+
+1. Store your private key securely (never commit to git!)
+2. Set environment variables:
+   ```bash
+   export SF_USERNAME=your-username@example.com
+   export SF_CLIENT_ID=your-consumer-key
+   export SF_PRIVATE_KEY_PATH=/path/to/server.key
+   export SF_SANDBOX=false
+   ```
+3. Or add to `.env` file (already gitignored)
+
+**Verify JWT Setup:**
+
+```python
+from sf_utils import get_client
+
+# Auto-detects JWT flow from SF_PRIVATE_KEY_PATH
+client = get_client()
+print(f"Connected to: {client.sf_instance}")
+```
+
+---
+
+#### Password Flow (Legacy)
+
+For development/testing with non-MFA accounts only. **Not recommended for production.**
+
 ```env
 SF_USERNAME=your-username@example.com
 SF_PASSWORD=your-password
@@ -74,6 +188,10 @@ SF_API_VERSION=v61.0      # optional
 2. Enable OAuth Settings
 3. Add scopes: `api`, `refresh_token`
 4. Copy Consumer Key (Client ID) and Consumer Secret
+
+> **Note**: Password flow will fail if your org has MFA enforcement or phishing-resistant policies enabled. Use JWT Bearer flow instead.
+
+---
 
 ### PostgreSQL (Docker)
 
@@ -119,20 +237,30 @@ docker run -d \
 ### Salesforce Client
 
 ```python
-from sf_utils import get_client, SalesforceConfig
+from sf_utils import get_client, SalesforceConfig, SalesforceJWTConfig
+from pathlib import Path
 
-# Auto-load from environment
+# Auto-load from environment (auto-detects JWT vs password)
 client = get_client()
 
-# Or explicit configuration
-config = SalesforceConfig(
+# Or explicit JWT configuration (recommended)
+jwt_config = SalesforceJWTConfig(
+    username="user@example.com",
+    client_id="your-consumer-key",
+    private_key_path=Path("/path/to/server.key"),
+    sandbox=False
+)
+client = get_client(config=jwt_config)
+
+# Or explicit password configuration (legacy)
+password_config = SalesforceConfig(
     username="user@example.com",
     password="password",
     client_id="xxx",
     client_secret="xxx",
     sandbox=True
 )
-client = get_client(config=config)
+client = get_client(config=password_config)
 ```
 
 ### SOQL Queries
