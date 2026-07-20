@@ -167,13 +167,14 @@ def sync(
                 )
 
         except Exception as e:
-            # If count query fails, log error and default to REST
+            # If count query fails (e.g., timeout on large objects), assume worst case
+            # and use BULK mode which handles large datasets better
             logger.warning(
-                "COUNT() query failed for %s: %s - defaulting to REST mode",
+                "COUNT() query failed for %s: %s - assuming large dataset, using BULK mode",
                 object_name,
                 str(e),
             )
-            selected_mode = SyncMode.REST
+            selected_mode = SyncMode.BULK
 
     # Execute sync with selected mode
     if selected_mode == SyncMode.REST:

@@ -234,6 +234,53 @@ class TestSyncAutoModeSelection:
             if record.levelno == logging.INFO
         )
 
+    @patch('sf_utils.sync.sync_records_bulk')
+    @patch('sf_utils.sync.query')
+    def test_auto_defaults_to_bulk_on_count_query_failure(
+        self, mock_query, mock_sync_records_bulk, caplog
+    ):
+        """AUTO mode should default to BULK when COUNT() query fails (e.g., timeout)."""
+        SyncMode, sync = import_sync()
+        import logging
+
+        # Mock count query to raise an exception (simulating timeout)
+        mock_query.side_effect = Exception("Read timed out")
+        mock_client = Mock()
+        mock_db_conn = Mock()
+
+        # Mock sync_records_bulk to return a valid SyncResult
+        mock_sync_records_bulk.return_value = SyncResult(
+            object_name="Progress_Note__c",
+            records_fetched=50000,
+            records_inserted=50000,
+            records_updated=0,
+            sync_mode="bulk",
+            start_timestamp=datetime.now(timezone.utc),
+            end_timestamp=datetime.now(timezone.utc),
+            date_field="LastModifiedDate",
+        )
+
+        # Capture logs
+        with caplog.at_level(logging.WARNING):
+            result = sync(
+                soql="SELECT Id, Name, LastModifiedDate FROM Progress_Note__c",
+                object_name="Progress_Note__c",
+                mode=SyncMode.AUTO,
+                threshold=10000,
+                client=mock_client,
+                db_conn=mock_db_conn,
+            )
+
+        # Verify WARNING log about count query failure
+        assert any(
+            "COUNT() query failed" in record.message and "BULK" in record.message
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        )
+
+        # Verify sync_records_bulk (Bulk API) was called, not sync_records
+        assert mock_sync_records_bulk.called
+
 
 class TestSyncExplicitMode:
     """Tests for explicit mode selection (REST or BULK)."""
@@ -490,12 +537,12 @@ class TestSyncCountQuery:
 class TestSyncErrorHandling:
     """Tests for error handling and edge cases."""
 
-    @patch('sf_utils.sync.sync_records')
+    @patch('sf_utils.sync.sync_records_bulk')
     @patch('sf_utils.sync.query')
-    def test_count_query_failure_defaults_to_rest(
-        self, mock_query, mock_sync_records
+    def test_count_query_failure_defaults_to_bulk(
+        self, mock_query, mock_sync_records_bulk
     ):
-        """Count query failure should log warning and default to REST mode."""
+        """Count query failure should log warning and default to BULK mode (assume large dataset)."""
         SyncMode, sync = import_sync()
         from sf_utils.exceptions import SalesforceAPIError
         import logging
@@ -509,19 +556,19 @@ class TestSyncErrorHandling:
             status_code=400
         )
 
-        # Mock sync_records to succeed
-        mock_sync_records.return_value = SyncResult(
+        # Mock sync_records_bulk to succeed
+        mock_sync_records_bulk.return_value = SyncResult(
             object_name="Account",
             records_fetched=0,
             records_inserted=0,
             records_updated=0,
-            sync_mode="incremental",
+            sync_mode="bulk",
             start_timestamp=datetime.now(timezone.utc),
             end_timestamp=datetime.now(timezone.utc),
             date_field="LastModifiedDate",
         )
 
-        # Implementation defaults to REST on count failure (doesn't raise)
+        # Implementation defaults to BULK on count failure (assumes large dataset)
         result = sync(
             soql="SELECT Id, LastModifiedDate FROM Account",
             object_name="Account",
@@ -530,8 +577,8 @@ class TestSyncErrorHandling:
             db_conn=mock_db_conn,
         )
 
-        # Verify REST mode was used as fallback
-        assert mock_sync_records.called
+        # Verify BULK mode was used as fallback
+        assert mock_sync_records_bulk.called
 
     @patch('sf_utils.sync.sync_records')
     @patch('sf_utils.sync.query')
