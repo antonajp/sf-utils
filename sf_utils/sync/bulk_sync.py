@@ -13,6 +13,7 @@ from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.db import create_table_from_query, get_connection, upsert_records
+from sf_utils.db.schema import _sanitize_column_name
 from sf_utils.exceptions import SalesforceAPIError, SalesforceAuthError, _sanitize_value
 from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG, with_retry, raise_for_status
 from sf_utils.sync.rest_sync import SyncResult, _inject_incremental_filter
@@ -923,10 +924,11 @@ def sync_records_bulk(
         logger.info("Downloading and processing results: job_id=%s batch_size=%d", job_id, batch_size)
 
         for batch in get_bulk_results(job_id=job_id, client=client, batch_size=batch_size):
-            # Normalize column keys to lowercase
+            # Normalize column keys using same sanitization as table creation
+            # This ensures headers like "CreatedBy.Id" match columns like "createdby_id"
             normalized_batch = []
             for record in batch:
-                normalized_record = {k.lower(): v for k, v in record.items()}
+                normalized_record = {_sanitize_column_name(k): v for k, v in record.items()}
                 normalized_batch.append(normalized_record)
 
             total_records += len(normalized_batch)
