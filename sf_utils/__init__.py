@@ -25,7 +25,7 @@ from sf_utils.retry import (
     BATCH_RETRY_CONFIG,
     NO_RETRY_CONFIG,
 )
-from sf_utils.sync import load_soql
+from sf_utils.sync import load_soql, query_chunked, ChunkInterval
 
 __version__ = "0.2.0"
 
@@ -55,4 +55,6 @@ __all__ = [
     "NO_RETRY_CONFIG",
     # Sync utilities
     "load_soql",
+    "query_chunked",
+    "ChunkInterval",
 ]
