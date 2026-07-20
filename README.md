@@ -170,7 +170,7 @@ Repeat this step for each org (production and each sandbox). Use the correspondi
 1. In your External Client App, go to the **Policies** tab
 2. Click **Edit** in the OAuth Policies section
 3. Set **Permitted Users** to: "Admin approved users are pre-authorized"
-4. Set **IP Relaxation** to: "Relax IP restrictions" (for server-to-server)
+4. Set **IP Relaxation** to: "Enforce IP restrictions" (recommended for corporate firewall security)
 5. Click **Save**
 6. In the **App Policies** section, click **Add** next to Permission Sets
 7. Add the permission sets for users who will authenticate via JWT
