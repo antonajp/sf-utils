@@ -1,5 +1,6 @@
 """Sync utilities for Salesforce data synchronization."""
 
+from sf_utils.sync.bulk_sync import create_bulk_query_job
 from sf_utils.sync.rest_sync import ChunkInterval, query_chunked
 from sf_utils.sync.soql_loader import load_soql, render_soql, validate_soql
 from sf_utils.sync.state import (
@@ -10,6 +11,7 @@ from sf_utils.sync.state import (
 )
 
 __all__ = [
+    "create_bulk_query_job",
     "ChunkInterval",
     "query_chunked",
     "load_soql",
