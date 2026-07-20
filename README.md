@@ -35,8 +35,17 @@ cd sf-utils
 
 # Create virtual environment
 python3 -m venv .venv
-source .venv/bin/activate
+```
 
+**Activate virtual environment:**
+
+| Platform | Command |
+|----------|---------|
+| Linux/macOS | `source .venv/bin/activate` |
+| Windows PowerShell | `.\.venv\Scripts\Activate.ps1` |
+| Windows CMD | `.venv\Scripts\activate.bat` |
+
+```bash
 # Install dependencies
 pip install -e ".[dev]"
 ```
@@ -439,8 +448,15 @@ DELETE FROM sf_sync_state WHERE object_name = 'Account';
 
 ### Run Tests
 
+Linux/macOS:
 ```bash
 source .venv/bin/activate
+pytest tests/ -v
+```
+
+Windows PowerShell:
+```powershell
+.\.venv\Scripts\Activate.ps1
 pytest tests/ -v
 ```
 
