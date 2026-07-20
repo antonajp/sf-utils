@@ -653,14 +653,41 @@ pytest tests/ -v
 ### Project Structure
 
 ```
-sf_utils/
-├── __init__.py      # Public API exports
-├── client.py        # get_client(), SalesforceConfig
-├── query.py         # query(), query_all()
-└── sobjects.py      # CRUD operations
+sf-utils/
+├── sf_utils/           # Library (don't modify)
+│   ├── __init__.py     #   Public API exports
+│   ├── client.py       #   get_client(), SalesforceConfig
+│   ├── query.py        #   query(), query_all()
+│   └── sobjects.py     #   CRUD operations
+├── examples/           # Sample scripts (committed)
+│   ├── query_accounts.py
+│   └── crud_contact.py
+├── projects/           # Your custom scripts (gitignored)
+│   └── .gitkeep
+├── scripts/            # Infrastructure setup
+│   ├── setup-db.sh
+│   └── setup-db.ps1
+├── tests/              # Unit tests
+├── .env                # Your environment config (gitignored)
+└── .env.example        # Template for .env
+```
 
-tests/
-└── test_client.py   # Unit tests with mocked SF client
+### Where to Put Your Code
+
+| Directory | Purpose | Committed to Git? |
+|-----------|---------|-------------------|
+| `sf_utils/` | Library code - import from here, don't modify | Yes |
+| `examples/` | Sample scripts showing common patterns | Yes |
+| `projects/` | **Your custom scripts and projects** | No (gitignored) |
+| `scripts/` | Infrastructure setup (Docker, DB) | Yes |
+
+**Getting started:**
+```bash
+# Copy an example as a starting point
+cp examples/query_accounts.py projects/my_report.py
+
+# Edit and run your script
+python projects/my_report.py
 ```
 
 ## License

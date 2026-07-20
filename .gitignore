@@ -43,6 +43,13 @@ htmlcov/
 # Generated documentation
 docs/
 
+# User projects (local work, not committed)
+projects/*
+!projects/.gitkeep
+
+# Output files
+output/
+
 # OS
 .DS_Store
 Thumbs.db
