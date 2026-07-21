@@ -14,12 +14,67 @@ from typing import Optional
 import click
 
 from sf_utils.client import get_client
+from sf_utils.db import get_connection
 from sf_utils.sync import SyncMode, sync
 from sf_utils.sync.config import SyncJobConfig, load_sync_config
 from sf_utils.sync.rest_sync import SyncResult
 from sf_utils.sync.soql_loader import load_soql
+from sf_utils.sync.state import ensure_sync_state_table
 
 logger = logging.getLogger(__name__)
+
+
+def _reset_sync_state(object_name: str) -> bool:
+    """Delete sync state for an object to force full resync.
+
+    Args:
+        object_name: Salesforce object name.
+
+    Returns:
+        True if state was deleted, False if no state existed.
+
+    Raises:
+        click.ClickException: If database operation fails.
+    """
+    logger.debug("Resetting sync state for object: %s", object_name)
+
+    try:
+        db_conn = get_connection()
+    except ValueError as e:
+        logger.error("Missing PostgreSQL credentials: %s", e)
+        raise click.ClickException(
+            f"Missing PostgreSQL credentials: {e}\n"
+            f"Required: PG_HOST, PG_DATABASE, PG_USER, PG_PASSWORD"
+        ) from e
+    except Exception as e:
+        logger.error("Failed to connect to PostgreSQL: %s", e)
+        raise click.ClickException(f"Failed to connect to PostgreSQL: {e}") from e
+
+    try:
+        ensure_sync_state_table(db_conn)
+
+        cursor = db_conn.cursor()
+        cursor.execute(
+            "DELETE FROM sf_sync_state WHERE object_name = %s",
+            (object_name,)
+        )
+        deleted = cursor.rowcount > 0
+        db_conn.commit()
+
+        if deleted:
+            logger.info("Deleted sync state for %s - next sync will be full", object_name)
+        else:
+            logger.debug("No sync state found for %s", object_name)
+
+        return deleted
+
+    except Exception as e:
+        db_conn.rollback()
+        logger.error("Failed to reset sync state for %s: %s", object_name, e)
+        raise click.ClickException(f"Failed to reset sync state: {e}") from e
+
+    finally:
+        db_conn.close()
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -306,6 +361,11 @@ def cli() -> None:
     is_flag=True,
     help="Enable debug logging for detailed output",
 )
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Clear sync state before running to force a full resync (ignores watermark)",
+)
 def sync_cmd(
     object_name: Optional[str],
     sync_all: bool,
@@ -313,6 +373,7 @@ def sync_cmd(
     mode: str,
     config: Path,
     verbose: bool,
+    reset: bool,
 ) -> None:
     """Sync Salesforce data to local PostgreSQL database.
 
@@ -340,6 +401,10 @@ def sync_cmd(
         # Enable debug logging
         sf-sync sync --verbose Account
 
+        # Force full resync (clear watermark)
+        sf-sync sync --reset Account
+        sf-sync sync --reset --mode bulk Progress_Note__c
+
     Credentials are loaded from environment variables:
         JWT auth: SF_USERNAME, SF_CLIENT_ID, SF_PRIVATE_KEY_PATH
         Password auth: SF_USERNAME, SF_PASSWORD, SF_CLIENT_ID, SF_CLIENT_SECRET
@@ -353,13 +418,14 @@ def sync_cmd(
     _configure_logging(verbose)
 
     logger.debug(
-        "CLI invoked: object_name=%s sync_all=%s dry_run=%s mode=%s config=%s verbose=%s",
+        "CLI invoked: object_name=%s sync_all=%s dry_run=%s mode=%s config=%s verbose=%s reset=%s",
         object_name,
         sync_all,
         dry_run,
         mode,
         config,
         verbose,
+        reset,
     )
 
     try:
@@ -369,6 +435,14 @@ def sync_cmd(
         # Single object sync
         if object_name:
             logger.info("Single object sync: %s", object_name)
+
+            # Reset sync state if requested (before loading config to fail fast on DB issues)
+            if reset and not dry_run:
+                deleted = _reset_sync_state(object_name)
+                if deleted:
+                    click.echo(f"Cleared sync state for {object_name} - will perform full sync")
+                else:
+                    click.echo(f"No existing sync state for {object_name}")
 
             # Load sync job config
             job_config = _load_sync_job_config(config, object_name)
@@ -416,6 +490,12 @@ def sync_cmd(
                 try:
                     logger.info("Syncing object: %s", obj_name)
                     click.echo(f"\n--- {obj_name} ---")
+
+                    # Reset sync state if requested
+                    if reset and not dry_run:
+                        deleted = _reset_sync_state(obj_name)
+                        if deleted:
+                            click.echo(f"Cleared sync state - will perform full sync")
 
                     result = _execute_sync(job_config, mode, dry_run)
                     _print_sync_summary(obj_name, result, dry_run)

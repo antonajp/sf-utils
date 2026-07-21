@@ -942,3 +942,166 @@ syncs:
         # Verify get_client was called without config argument
         mock_get_client.assert_called_once_with()
 
+
+class TestResetFlag:
+    """Test --reset flag functionality."""
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("pathlib.Path.exists")
+    @patch("sf_utils.cli.load_soql")
+    @patch("sf_utils.cli.get_client")
+    @patch("sf_utils.cli.sync")
+    @patch("sf_utils.cli._reset_sync_state")
+    def test_reset_flag_clears_sync_state_before_sync(
+        self,
+        mock_reset,
+        mock_sync,
+        mock_get_client,
+        mock_load_soql,
+        mock_path_exists,
+        mock_load_sync_config,
+        tmp_path,
+    ):
+        """Test that --reset clears sync state before running sync."""
+        runner = CliRunner()
+
+        # Create minimal config file
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text("syncs: []")
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                enabled=True,
+            )
+        ]
+        mock_path_exists.return_value = True
+        mock_load_soql.return_value = "SELECT Id, Name FROM Account"
+        mock_get_client.return_value = MagicMock()
+        mock_reset.return_value = True  # State was deleted
+
+        now = datetime.now(timezone.utc)
+        mock_result = SyncResult(
+            object_name="Account",
+            records_fetched=100,
+            records_inserted=100,
+            records_updated=0,
+            sync_mode="bulk",
+            start_timestamp=now,
+            end_timestamp=now,
+            date_field="LastModifiedDate",
+        )
+        mock_sync.return_value = mock_result
+
+        # Run with --reset
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--reset", "--config", str(config_file)],
+            catch_exceptions=False,
+        )
+
+        # Verify reset was called
+        mock_reset.assert_called_once_with("Account")
+        assert result.exit_code == 0
+        assert "Cleared sync state" in result.output
+        assert "full sync" in result.output
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("sf_utils.cli._reset_sync_state")
+    def test_reset_flag_with_dry_run_does_not_reset(
+        self,
+        mock_reset,
+        mock_load_sync_config,
+        tmp_path,
+    ):
+        """Test that --reset with --dry-run does not actually reset state."""
+        runner = CliRunner()
+
+        # Create minimal config file
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text("syncs: []")
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                enabled=True,
+            )
+        ]
+
+        # Run with --reset --dry-run
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--reset", "--dry-run", "--config", str(config_file)],
+            catch_exceptions=False,
+        )
+
+        # Verify reset was NOT called (dry run)
+        mock_reset.assert_not_called()
+        assert result.exit_code == 0
+        assert "DRY RUN" in result.output
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("pathlib.Path.exists")
+    @patch("sf_utils.cli.load_soql")
+    @patch("sf_utils.cli.get_client")
+    @patch("sf_utils.cli.sync")
+    @patch("sf_utils.cli._reset_sync_state")
+    def test_reset_flag_with_no_existing_state(
+        self,
+        mock_reset,
+        mock_sync,
+        mock_get_client,
+        mock_load_soql,
+        mock_path_exists,
+        mock_load_sync_config,
+        tmp_path,
+    ):
+        """Test --reset when no sync state exists."""
+        runner = CliRunner()
+
+        # Create minimal config file
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text("syncs: []")
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                enabled=True,
+            )
+        ]
+        mock_path_exists.return_value = True
+        mock_load_soql.return_value = "SELECT Id, Name FROM Account"
+        mock_get_client.return_value = MagicMock()
+        mock_reset.return_value = False  # No state existed
+
+        now = datetime.now(timezone.utc)
+        mock_result = SyncResult(
+            object_name="Account",
+            records_fetched=100,
+            records_inserted=100,
+            records_updated=0,
+            sync_mode="bulk",
+            start_timestamp=now,
+            end_timestamp=now,
+            date_field="LastModifiedDate",
+        )
+        mock_sync.return_value = mock_result
+
+        # Run with --reset
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--reset", "--config", str(config_file)],
+            catch_exceptions=False,
+        )
+
+        # Verify reset was called and message shows no state existed
+        mock_reset.assert_called_once_with("Account")
+        assert result.exit_code == 0
+        assert "No existing sync state" in result.output
+
