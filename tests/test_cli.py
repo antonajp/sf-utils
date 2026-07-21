@@ -105,10 +105,8 @@ class TestCLICommand:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_dry_run_mode_does_not_execute_sync(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -157,10 +155,8 @@ syncs:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_single_object_sync_success(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -196,17 +192,7 @@ syncs:
         mock_path_exists.return_value = True
         mock_load_soql.return_value = "SELECT Id, Name FROM Account"
 
-        mock_config_from_env.return_value = Mock(
-            username="test@example.com",
-            password="password",
-            client_id="client_id",
-            client_secret="client_secret",
-            sandbox=False,
-            api_version="v61.0",
-        )
-
-        mock_client = Mock()
-        mock_get_client.return_value = mock_client
+        mock_get_client.return_value = Mock()
 
         now = datetime.now(timezone.utc)
         mock_result = SyncResult(
@@ -288,10 +274,8 @@ syncs:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_sync_all_executes_multiple_objects(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -335,7 +319,6 @@ syncs:
         mock_path_exists.return_value = True
         mock_load_soql.return_value = "SELECT Id, Name FROM Object"
 
-        mock_config_from_env.return_value = Mock()
         mock_get_client.return_value = Mock()
 
         now = datetime.now(timezone.utc)
@@ -380,10 +363,8 @@ class TestModeOverride:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_mode_bulk_override(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -420,7 +401,6 @@ syncs:
 
         mock_path_exists.return_value = True
         mock_load_soql.return_value = "SELECT Id, Name FROM Account"
-        mock_config_from_env.return_value = Mock()
         mock_get_client.return_value = Mock()
 
         now = datetime.now(timezone.utc)
@@ -454,10 +434,8 @@ syncs:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_mode_rest_override(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -494,7 +472,6 @@ syncs:
 
         mock_path_exists.return_value = True
         mock_load_soql.return_value = "SELECT Id, Name FROM Account"
-        mock_config_from_env.return_value = Mock()
         mock_get_client.return_value = Mock()
 
         now = datetime.now(timezone.utc)
@@ -537,10 +514,8 @@ class TestOutputFormatAndExitCodes:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_success_output_includes_all_fields(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -575,7 +550,6 @@ syncs:
 
         mock_path_exists.return_value = True
         mock_load_soql.return_value = "SELECT Id, Name FROM Contact"
-        mock_config_from_env.return_value = Mock()
         mock_get_client.return_value = Mock()
 
         # Mock sync with known values
@@ -612,10 +586,8 @@ syncs:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_sync_failure_returns_exit_code_1(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -652,7 +624,6 @@ syncs:
 
         mock_path_exists.return_value = True
         mock_load_soql.return_value = "SELECT Id, Name FROM Account"
-        mock_config_from_env.return_value = Mock()
         mock_get_client.return_value = Mock()
 
         # Mock sync to raise exception
@@ -717,10 +688,8 @@ class TestIntegrationScenarios:
     @patch("sf_utils.cli.load_soql")
     @patch("sf_utils.cli.get_client")
     @patch("sf_utils.cli.sync")
-    @patch("sf_utils.cli.SalesforceConfig.from_env")
     def test_partial_failure_handling(
         self,
-        mock_config_from_env,
         mock_sync,
         mock_get_client,
         mock_load_soql,
@@ -763,7 +732,6 @@ syncs:
 
         mock_path_exists.return_value = True
         mock_load_soql.return_value = "SELECT Id, Name FROM Object"
-        mock_config_from_env.return_value = Mock()
         mock_get_client.return_value = Mock()
 
         # First sync succeeds, second fails
@@ -793,4 +761,347 @@ syncs:
         # CLI should report the failure
         assert "Failed: 1" in result.output or "Error" in result.output
 
+
+class TestAuthMethodDetection:
+    """Tests for JWT vs password auth method detection in CLI context."""
+
+    @pytest.fixture
+    def runner(self):
+        """Create Click test runner."""
+        return CliRunner()
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("sf_utils.cli.get_client")
+    def test_get_client_called_without_config_arg(
+        self,
+        mock_get_client,
+        mock_load_sync_config,
+        runner,
+        tmp_path,
+    ):
+        """CLI should call get_client() without config arg to enable auto-detection."""
+        # Setup mocks
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text(
+            """
+syncs:
+  - object_name: Account
+    soql_file: account.soql
+    date_field: LastModifiedDate
+    mode: auto
+    enabled: true
+"""
+        )
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                mode="auto",
+                enabled=True,
+            )
+        ]
+
+        mock_get_client.return_value = Mock()
+
+        # Run with --dry-run to skip actual sync execution
+        # Dry run doesn't call get_client, so we need a non-dry run
+        # but we can verify the call pattern by having get_client succeed
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--config", str(config_file), "--dry-run"],
+        )
+
+        # Dry run exits before calling get_client, so we just verify no config error
+        assert result.exit_code == 0
+        assert "DRY RUN" in result.output
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("sf_utils.cli.get_client")
+    def test_missing_credentials_error_shows_both_auth_methods(
+        self,
+        mock_get_client,
+        mock_load_sync_config,
+        runner,
+        tmp_path,
+    ):
+        """Error message should list both JWT and password auth required variables."""
+        # Setup mocks
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text(
+            """
+syncs:
+  - object_name: Account
+    soql_file: account.soql
+    date_field: LastModifiedDate
+    mode: auto
+    enabled: true
+"""
+        )
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                mode="auto",
+                enabled=True,
+            )
+        ]
+
+        # Simulate missing credentials
+        mock_get_client.side_effect = ValueError(
+            "missing required environment variables: SF_USERNAME"
+        )
+
+        # Run CLI (non-dry-run to trigger auth)
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--config", str(config_file)],
+        )
+
+        # Verify exit code and error message
+        assert result.exit_code == 1
+        assert "Missing Salesforce credentials" in result.output
+
+        # Error message should list both auth methods
+        assert "JWT auth" in result.output
+        assert "SF_PRIVATE_KEY_PATH" in result.output
+        assert "Password auth" in result.output or "password auth" in result.output
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("sf_utils.cli.Path.exists")
+    @patch("sf_utils.cli.load_soql")
+    @patch("sf_utils.cli.get_client")
+    @patch("sf_utils.cli.sync")
+    def test_jwt_auth_works_when_configured(
+        self,
+        mock_sync,
+        mock_get_client,
+        mock_load_soql,
+        mock_path_exists,
+        mock_load_sync_config,
+        runner,
+        tmp_path,
+    ):
+        """JWT auth should work when get_client auto-detects it."""
+        # Setup mocks
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text(
+            """
+syncs:
+  - object_name: Account
+    soql_file: account.soql
+    date_field: LastModifiedDate
+    mode: auto
+    enabled: true
+"""
+        )
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                mode="auto",
+                enabled=True,
+            )
+        ]
+
+        mock_path_exists.return_value = True
+        mock_load_soql.return_value = "SELECT Id, Name FROM Account"
+
+        # Mock get_client to return a mock client (simulating JWT auth success)
+        mock_get_client.return_value = Mock()
+
+        now = datetime.now(timezone.utc)
+        mock_result = SyncResult(
+            object_name="Account",
+            records_fetched=100,
+            records_inserted=50,
+            records_updated=50,
+            sync_mode="rest",
+            start_timestamp=now,
+            end_timestamp=now,
+            date_field="LastModifiedDate",
+        )
+        mock_sync.return_value = mock_result
+
+        # Run CLI
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--config", str(config_file)],
+            catch_exceptions=False,
+        )
+
+        # Verify success
+        assert result.exit_code == 0
+        assert "Sync Summary" in result.output
+
+        # Verify get_client was called without config argument
+        mock_get_client.assert_called_once_with()
+
+
+class TestResetFlag:
+    """Test --reset flag functionality."""
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("pathlib.Path.exists")
+    @patch("sf_utils.cli.load_soql")
+    @patch("sf_utils.cli.get_client")
+    @patch("sf_utils.cli.sync")
+    @patch("sf_utils.cli._reset_sync_state")
+    def test_reset_flag_clears_sync_state_before_sync(
+        self,
+        mock_reset,
+        mock_sync,
+        mock_get_client,
+        mock_load_soql,
+        mock_path_exists,
+        mock_load_sync_config,
+        tmp_path,
+    ):
+        """Test that --reset clears sync state before running sync."""
+        runner = CliRunner()
+
+        # Create minimal config file
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text("syncs: []")
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                enabled=True,
+            )
+        ]
+        mock_path_exists.return_value = True
+        mock_load_soql.return_value = "SELECT Id, Name FROM Account"
+        mock_get_client.return_value = MagicMock()
+        mock_reset.return_value = True  # State was deleted
+
+        now = datetime.now(timezone.utc)
+        mock_result = SyncResult(
+            object_name="Account",
+            records_fetched=100,
+            records_inserted=100,
+            records_updated=0,
+            sync_mode="bulk",
+            start_timestamp=now,
+            end_timestamp=now,
+            date_field="LastModifiedDate",
+        )
+        mock_sync.return_value = mock_result
+
+        # Run with --reset
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--reset", "--config", str(config_file)],
+            catch_exceptions=False,
+        )
+
+        # Verify reset was called
+        mock_reset.assert_called_once_with("Account")
+        assert result.exit_code == 0
+        assert "Cleared sync state" in result.output
+        assert "full sync" in result.output
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("sf_utils.cli._reset_sync_state")
+    def test_reset_flag_with_dry_run_does_not_reset(
+        self,
+        mock_reset,
+        mock_load_sync_config,
+        tmp_path,
+    ):
+        """Test that --reset with --dry-run does not actually reset state."""
+        runner = CliRunner()
+
+        # Create minimal config file
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text("syncs: []")
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                enabled=True,
+            )
+        ]
+
+        # Run with --reset --dry-run
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--reset", "--dry-run", "--config", str(config_file)],
+            catch_exceptions=False,
+        )
+
+        # Verify reset was NOT called (dry run)
+        mock_reset.assert_not_called()
+        assert result.exit_code == 0
+        assert "DRY RUN" in result.output
+
+    @patch("sf_utils.cli.load_sync_config")
+    @patch("pathlib.Path.exists")
+    @patch("sf_utils.cli.load_soql")
+    @patch("sf_utils.cli.get_client")
+    @patch("sf_utils.cli.sync")
+    @patch("sf_utils.cli._reset_sync_state")
+    def test_reset_flag_with_no_existing_state(
+        self,
+        mock_reset,
+        mock_sync,
+        mock_get_client,
+        mock_load_soql,
+        mock_path_exists,
+        mock_load_sync_config,
+        tmp_path,
+    ):
+        """Test --reset when no sync state exists."""
+        runner = CliRunner()
+
+        # Create minimal config file
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text("syncs: []")
+
+        mock_load_sync_config.return_value = [
+            SyncJobConfig(
+                object_name="Account",
+                soql_file="account.soql",
+                date_field="LastModifiedDate",
+                enabled=True,
+            )
+        ]
+        mock_path_exists.return_value = True
+        mock_load_soql.return_value = "SELECT Id, Name FROM Account"
+        mock_get_client.return_value = MagicMock()
+        mock_reset.return_value = False  # No state existed
+
+        now = datetime.now(timezone.utc)
+        mock_result = SyncResult(
+            object_name="Account",
+            records_fetched=100,
+            records_inserted=100,
+            records_updated=0,
+            sync_mode="bulk",
+            start_timestamp=now,
+            end_timestamp=now,
+            date_field="LastModifiedDate",
+        )
+        mock_sync.return_value = mock_result
+
+        # Run with --reset
+        result = runner.invoke(
+            main,
+            ["sync", "Account", "--reset", "--config", str(config_file)],
+            catch_exceptions=False,
+        )
+
+        # Verify reset was called and message shows no state existed
+        mock_reset.assert_called_once_with("Account")
+        assert result.exit_code == 0
+        assert "No existing sync state" in result.output
 

@@ -75,6 +75,17 @@ SALESFORCE_TYPE_TO_POSTGRES: Dict[str, str] = {
 }
 
 
+# Aggregate function to PostgreSQL type mapping
+# Used when inferring types for aggregate query results
+AGGREGATE_FUNCTION_TYPES: Dict[str, str] = {
+    "count": "BIGINT",  # Use BIGINT to prevent overflow for large counts
+    "sum": "NUMERIC",  # Use NUMERIC for arbitrary precision
+    "avg": "NUMERIC",  # Use NUMERIC for arbitrary precision
+    "min": "TEXT",  # Default to TEXT; inherit field type when available
+    "max": "TEXT",  # Default to TEXT; inherit field type when available
+}
+
+
 def validate_postgres_type(pg_type: str) -> str:
     """Validate that a PostgreSQL type string is safe to use in SQL.
 
@@ -207,3 +218,64 @@ def get_postgres_type(
         sf_type,
     )
     return "TEXT"
+
+
+def infer_aggregate_type(expression: str) -> Optional[str]:
+    """Infer PostgreSQL type from SOQL aggregate function expression.
+
+    Detects aggregate functions (COUNT, SUM, AVG, MIN, MAX) and returns
+    the appropriate PostgreSQL type. Uses whitelist validation for security.
+
+    Args:
+        expression: SOQL expression (e.g., "COUNT(Id)", "SUM(Amount)").
+
+    Returns:
+        PostgreSQL type string if aggregate detected, None otherwise.
+
+    Example:
+        >>> infer_aggregate_type("COUNT(Id)")
+        'BIGINT'
+        >>> infer_aggregate_type("SUM(Amount)")
+        'NUMERIC'
+        >>> infer_aggregate_type("AVG(Revenue)")
+        'NUMERIC'
+        >>> infer_aggregate_type("Name")
+        None
+    """
+    # Prevent ReDoS by limiting expression length
+    if len(expression) > 1000:
+        logger.debug(
+            "Expression exceeds max length, skipping aggregate type inference: %s...",
+            expression[:100],
+        )
+        return None
+
+    expression = expression.strip()
+    logger.debug("Inferring aggregate type for expression: %s", expression)
+
+    # Pattern: FUNCTION_NAME(...)
+    pattern = r"^(\w+)\s*\("
+    match = re.match(pattern, expression, re.IGNORECASE)
+
+    if match:
+        func_name = match.group(1).lower()
+        pg_type = AGGREGATE_FUNCTION_TYPES.get(func_name)
+
+        if pg_type:
+            logger.debug(
+                "Inferred aggregate type: expression=%s, function=%s, type=%s",
+                expression,
+                func_name,
+                pg_type,
+            )
+            return pg_type
+        else:
+            logger.debug(
+                "Function '%s' not in AGGREGATE_FUNCTION_TYPES: %s",
+                func_name,
+                expression,
+            )
+            return None
+
+    logger.debug("No aggregate function detected in expression: %s", expression)
+    return None

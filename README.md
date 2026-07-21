@@ -559,6 +559,10 @@ sf-sync sync --config ./my_config.yaml Account
 # Enable debug logging
 sf-sync sync --verbose Account
 
+# Force full resync (clear watermark)
+sf-sync sync --reset Account
+sf-sync sync --reset --mode bulk Progress_Note__c
+
 # Check sync status
 sf-sync status                      # Table format
 sf-sync status --json               # JSON format
@@ -712,6 +716,18 @@ sf-sync status
 ```
 
 **Reset sync state:**
+
+Use the `--reset` flag to clear the watermark and force a full resync:
+
+```bash
+# Reset and sync in one command
+sf-sync sync --reset Account
+
+# Reset with specific API mode
+sf-sync sync --reset --mode bulk Progress_Note__c
+```
+
+Or manually via SQL:
 
 ```sql
 -- Connect to PostgreSQL

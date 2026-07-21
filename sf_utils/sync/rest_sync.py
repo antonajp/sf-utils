@@ -12,6 +12,7 @@ from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.db import get_connection, create_table_from_query, upsert_records
+from sf_utils.db.schema import _sanitize_column_name
 from sf_utils.exceptions import SalesforceAPIError
 from sf_utils.query import query_all
 from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG
@@ -365,6 +366,8 @@ def sync_records(
     validate_date_field: bool = True,
     chunk_size: ChunkInterval = ChunkInterval.DAILY,
     mode: str = "incremental",
+    infer_aggregate_types: bool = True,
+    type_overrides: Optional[Dict[str, str]] = None,
     client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
     retry_config: Optional[RetryConfig] = DEFAULT_RETRY_CONFIG,
@@ -386,6 +389,10 @@ def sync_records(
         validate_date_field: If True, validate date_field exists in SELECT clause. Default True.
         chunk_size: Time interval for date chunking (incremental mode only). Default DAILY.
         mode: Sync mode - 'incremental' or 'full'. Default 'incremental'.
+        infer_aggregate_types: If True, infer numeric types for aggregate functions (COUNT, SUM, AVG).
+            Default True. COUNT uses BIGINT, SUM/AVG use NUMERIC.
+        type_overrides: Optional dict mapping column names to PostgreSQL types.
+            Overrides inferred types for specific columns.
         client: Authenticated Salesforce client. Creates one if not provided.
         db_conn: Active psycopg2 connection. Creates one if not provided.
         retry_config: Retry configuration. Defaults to DEFAULT_RETRY_CONFIG.
@@ -518,6 +525,8 @@ def sync_records(
             soql_query=soql,
             db_conn=db_conn,
             if_not_exists=True,
+            infer_aggregate_types=infer_aggregate_types,
+            type_overrides=type_overrides,
         )
 
         # Upsert records to database
@@ -525,10 +534,16 @@ def sync_records(
         records_updated = 0
 
         if all_records:
+            # Normalize record keys using same sanitization as table creation
+            # This ensures keys like "CreatedBy.Id" match columns like "createdby_id"
+            normalized_records = [
+                {_sanitize_column_name(k): v for k, v in record.items()}
+                for record in all_records
+            ]
             logger.info("Upserting %d records to %s", records_fetched, table_name)
             records_inserted, records_updated = upsert_records(
                 table_name=table_name,
-                records=all_records,
+                records=normalized_records,
                 connection=db_conn,
                 batch_size=500,
             )

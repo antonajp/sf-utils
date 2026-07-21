@@ -45,7 +45,7 @@ def sync(
     date_field: str = "LastModifiedDate",
     batch_size: int = 1000,
     poll_interval: float = 5.0,
-    timeout: float = 600.0,
+    timeout: float = 900.0,
     client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
 ) -> SyncResult:
@@ -68,7 +68,7 @@ def sync(
         date_field: Date/datetime field for incremental sync. Defaults to 'LastModifiedDate'.
         batch_size: Number of records to process per batch (BULK mode only). Defaults to 1000.
         poll_interval: Initial polling interval in seconds (BULK mode only). Defaults to 5.0.
-        timeout: Maximum time to poll job in seconds (BULK mode only). Defaults to 600.0 (10 minutes).
+        timeout: Maximum time to poll job in seconds (BULK mode only). Defaults to 900.0 (15 minutes).
         client: Authenticated Salesforce client. Creates one if not provided.
         db_conn: Active psycopg2 connection. Creates one if not provided.
 
@@ -167,13 +167,14 @@ def sync(
                 )
 
         except Exception as e:
-            # If count query fails, log error and default to REST
+            # If count query fails (e.g., timeout on large objects), assume worst case
+            # and use BULK mode which handles large datasets better
             logger.warning(
-                "COUNT() query failed for %s: %s - defaulting to REST mode",
+                "COUNT() query failed for %s: %s - assuming large dataset, using BULK mode",
                 object_name,
                 str(e),
             )
-            selected_mode = SyncMode.REST
+            selected_mode = SyncMode.BULK
 
     # Execute sync with selected mode
     if selected_mode == SyncMode.REST:

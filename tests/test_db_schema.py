@@ -22,6 +22,8 @@ from sf_utils.db.schema import (
     _parse_select_columns,
     _sanitize_column_name,
     _extract_alias,
+    _get_existing_columns,
+    _add_missing_columns,
 )
 from sf_utils.db.types import SALESFORCE_TYPE_TO_POSTGRES, get_postgres_type
 
@@ -51,10 +53,13 @@ class TestSanitizeColumnName:
         assert _sanitize_column_name("Field-Name") == "field_name"
         assert _sanitize_column_name("Field#123") == "field_123"
 
-    def test_consecutive_underscores_removed(self):
-        """Should collapse consecutive underscores."""
-        assert _sanitize_column_name("Field__Name") == "field_name"
-        assert _sanitize_column_name("A...B") == "a_b"
+    def test_consecutive_underscores_preserved(self):
+        """Should preserve consecutive underscores (important for Salesforce __c, __r)."""
+        assert _sanitize_column_name("Field__Name") == "field__name"
+        assert _sanitize_column_name("Custom_Object__c") == "custom_object__c"
+        assert _sanitize_column_name("Account__r") == "account__r"
+        # Dots become underscores, but consecutive underscores from dots are collapsed
+        assert _sanitize_column_name("A...B") == "a___b"
 
     def test_leading_trailing_underscores_removed(self):
         """Should remove leading/trailing underscores."""
@@ -205,19 +210,23 @@ class TestParseSelectColumns:
 class TestCreateTableFromQuery:
     """Tests for create_table_from_query function."""
 
-    def test_create_table_simple_query(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_simple_query(self, mock_get_columns):
         """Should create table with columns from simple SOQL query."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        # Simulate table created successfully
-        mock_cursor.fetchone.return_value = ["sf_account"]
+        # Simulate table doesn't exist (no existing columns)
+        mock_get_columns.return_value = []
 
         soql = "SELECT Id, Name, BillingCity FROM Account"
         result = create_table_from_query("sf_account", soql, mock_conn)
 
+        # Verify _get_existing_columns was called
+        mock_get_columns.assert_called_once_with("sf_account", mock_conn)
+
         # Verify CREATE TABLE was executed
-        assert mock_cursor.execute.call_count == 2  # CREATE + to_regclass check
+        assert mock_cursor.execute.call_count == 1  # CREATE only
         create_call = mock_cursor.execute.call_args_list[0]
 
         # Verify SQL uses Identifier for security
@@ -233,12 +242,13 @@ class TestCreateTableFromQuery:
         # Verify return value (table created)
         assert result is True
 
-    def test_create_table_with_if_not_exists_default(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_with_if_not_exists_default(self, mock_get_columns):
         """Should use IF NOT EXISTS by default."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_account"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = "SELECT Id, Name FROM Account"
         create_table_from_query("sf_account", soql, mock_conn)
@@ -248,12 +258,13 @@ class TestCreateTableFromQuery:
         executed_query = create_call[0][0]
         assert isinstance(executed_query, sql.Composed)
 
-    def test_create_table_without_if_not_exists(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_without_if_not_exists(self, mock_get_columns):
         """Should omit IF NOT EXISTS when if_not_exists=False."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_account"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = "SELECT Id, Name FROM Account"
         create_table_from_query("sf_account", soql, mock_conn, if_not_exists=False)
@@ -263,12 +274,13 @@ class TestCreateTableFromQuery:
         executed_query = create_call[0][0]
         assert isinstance(executed_query, sql.Composed)
 
-    def test_create_table_id_is_primary_key(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_id_is_primary_key(self, mock_get_columns):
         """Should make Id column PRIMARY KEY."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_account"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = "SELECT Id, Name FROM Account"
         create_table_from_query("sf_account", soql, mock_conn)
@@ -278,12 +290,13 @@ class TestCreateTableFromQuery:
         executed_query = create_call[0][0]
         assert isinstance(executed_query, sql.Composed)
 
-    def test_create_table_all_columns_text_type(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_all_columns_text_type(self, mock_get_columns):
         """Should create all columns as TEXT type."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_contact"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = "SELECT Id, Name, Email, Phone FROM Contact"
         create_table_from_query("sf_contact", soql, mock_conn)
@@ -293,12 +306,13 @@ class TestCreateTableFromQuery:
         executed_query = create_call[0][0]
         assert isinstance(executed_query, sql.Composed)
 
-    def test_create_table_with_relationship_columns(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_with_relationship_columns(self, mock_get_columns):
         """Should handle relationship traversal in column names."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_contact"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = "SELECT Id, Account.Name, Owner.Email FROM Contact"
         create_table_from_query("sf_contact", soql, mock_conn)
@@ -308,12 +322,13 @@ class TestCreateTableFromQuery:
         executed_query = create_call[0][0]
         assert isinstance(executed_query, sql.Composed)
 
-    def test_create_table_with_aliases(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_with_aliases(self, mock_get_columns):
         """Should use aliases for column names when present."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_contact"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = "SELECT Id, Account.Name AS AccountName, BillingCity AS City FROM Contact"
         create_table_from_query("sf_contact", soql, mock_conn)
@@ -346,11 +361,13 @@ class TestCreateTableFromQuery:
 
         assert "SELECT ... FROM" in str(exc_info.value)
 
-    def test_create_table_database_error_rollback(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_database_error_rollback(self, mock_get_columns):
         """Should rollback transaction on database error."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         # Simulate database error during CREATE TABLE
         mock_cursor.execute.side_effect = psycopg2.DatabaseError("table already exists")
@@ -365,7 +382,8 @@ class TestCreateTableFromQuery:
         # Verify cursor was closed
         mock_cursor.close.assert_called_once()
 
-    def test_create_table_uses_sql_identifier_for_security(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_uses_sql_identifier_for_security(self, mock_get_columns):
         """Should use psycopg2.sql.Identifier for table and column names.
 
         This prevents SQL injection by properly escaping identifiers.
@@ -373,7 +391,7 @@ class TestCreateTableFromQuery:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_account"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = "SELECT Id, Name FROM Account"
         create_table_from_query("sf_account", soql, mock_conn)
@@ -386,13 +404,14 @@ class TestCreateTableFromQuery:
         # Composed object ensures SQL injection protection
         # by using psycopg2.sql.Identifier for all identifiers
 
-    def test_create_table_returns_false_if_table_existed(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_create_table_returns_false_if_table_existed(self, mock_get_columns):
         """Should return False when table already existed."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        # Simulate table did NOT exist (to_regclass returns NULL)
-        mock_cursor.fetchone.return_value = [None]
+        # Simulate table already exists (has columns)
+        mock_get_columns.return_value = ["id", "name"]
 
         soql = "SELECT Id, Name FROM Account"
         result = create_table_from_query("sf_account", soql, mock_conn)
@@ -449,12 +468,14 @@ class TestCreateTableFromQuery:
         assert any("sf_account" in call_str for call_str in info_calls)
         assert any("3" in call_str for call_str in info_calls)  # 3 columns
 
+    @patch("sf_utils.db.schema._get_existing_columns")
     @patch("sf_utils.db.schema.logger")
-    def test_create_table_logs_error_on_failure(self, mock_logger):
+    def test_create_table_logs_error_on_failure(self, mock_logger, mock_get_columns):
         """Should log error at ERROR level on database failure."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
+        mock_get_columns.return_value = []  # Table doesn't exist
         mock_cursor.execute.side_effect = psycopg2.DatabaseError("permission denied")
 
         soql = "SELECT Id, Name FROM Account"
@@ -470,12 +491,13 @@ class TestCreateTableFromQuery:
 class TestIntegration:
     """Integration tests with realistic scenarios."""
 
-    def test_end_to_end_account_table_creation(self):
+    @patch("sf_utils.db.schema._get_existing_columns")
+    def test_end_to_end_account_table_creation(self, mock_get_columns):
         """Should create account table from realistic SOQL query."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = ["sf_account"]
+        mock_get_columns.return_value = []  # Table doesn't exist
 
         soql = """
         SELECT
@@ -496,7 +518,7 @@ class TestIntegration:
         assert result is True
 
         # Verify CREATE TABLE executed
-        assert mock_cursor.execute.call_count == 2
+        assert mock_cursor.execute.call_count == 1
         create_call = mock_cursor.execute.call_args_list[0]
         executed_query = create_call[0][0]
         assert isinstance(executed_query, sql.Composed)

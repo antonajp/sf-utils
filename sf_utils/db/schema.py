@@ -9,124 +9,85 @@ from psycopg2 import extensions, sql
 from psycopg2.extras import execute_values
 from simple_salesforce import Salesforce
 
-from sf_utils.db.types import SALESFORCE_TYPE_TO_POSTGRES, get_postgres_type
+from sf_utils.db.parser import (
+    _extract_alias,
+    _parse_select_columns,
+    _parse_select_columns_with_types,
+    _sanitize_column_name,
+)
+from sf_utils.db.types import (
+    SALESFORCE_TYPE_TO_POSTGRES,
+    get_postgres_type,
+    infer_aggregate_type,
+)
 from sf_utils.sobjects import describe_object
 
 logger = logging.getLogger(__name__)
 
 
-def _sanitize_column_name(name: str) -> str:
-    """Sanitize column name for PostgreSQL.
-
-    Converts to lowercase and replaces spaces/special chars with underscores.
-
-    Args:
-        name: Column name to sanitize.
-
-    Returns:
-        Sanitized column name safe for PostgreSQL.
-
-    Example:
-        >>> _sanitize_column_name("Billing City")
-        'billing_city'
-        >>> _sanitize_column_name("Account.Name")
-        'account_name'
-    """
-    logger.debug("Sanitizing column name: %s", name)
-    # Convert to lowercase
-    sanitized = name.lower()
-    # Replace special chars (spaces, dots, etc.) with underscores
-    sanitized = re.sub(r"[^a-z0-9_]", "_", sanitized)
-    # Remove consecutive underscores
-    sanitized = re.sub(r"_+", "_", sanitized)
-    # Remove leading/trailing underscores
-    sanitized = sanitized.strip("_")
-    logger.debug("Sanitized column name: %s -> %s", name, sanitized)
-    return sanitized
+def _get_existing_columns(table_name: str, db_conn: extensions.connection) -> List[str]:
+    """Get existing column names from a PostgreSQL table."""
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (table_name,),
+        )
+        columns = [row[0] for row in cursor.fetchall()]
+        logger.debug("Existing columns for %s: %s", table_name, columns)
+        return columns
+    finally:
+        cursor.close()
 
 
-def _extract_alias(field: str) -> str:
-    """Extract alias from SOQL field expression.
+def _add_missing_columns(
+    table_name: str,
+    required_columns: List[str],
+    existing_columns: List[str],
+    db_conn: extensions.connection,
+) -> List[str]:
+    """Add missing columns to an existing table."""
+    # Find missing columns (case-insensitive comparison)
+    existing_set = {col.lower() for col in existing_columns}
+    missing = [col for col in required_columns if col.lower() not in existing_set]
 
-    Handles "Field AS Alias" patterns and relationship traversals.
+    if not missing:
+        logger.debug("No missing columns for table %s", table_name)
+        return []
 
-    Args:
-        field: SOQL field expression (may contain AS alias).
+    logger.info(
+        "Adding %d missing column(s) to %s: %s",
+        len(missing),
+        table_name,
+        missing,
+    )
 
-    Returns:
-        Column name (alias if present, otherwise sanitized field name).
+    cursor = db_conn.cursor()
+    try:
+        for col in missing:
+            # All columns are TEXT type for flexibility
+            alter_stmt = sql.SQL("ALTER TABLE {} ADD COLUMN {} TEXT").format(
+                sql.Identifier(table_name),
+                sql.Identifier(col),
+            )
+            logger.debug("Executing: ALTER TABLE %s ADD COLUMN %s TEXT", table_name, col)
+            cursor.execute(alter_stmt)
 
-    Example:
-        >>> _extract_alias("Account.Name AS AccountName")
-        'accountname'
-        >>> _extract_alias("Account.Name")
-        'account_name'
-        >>> _extract_alias("Id")
-        'id'
-    """
-    logger.debug("Extracting alias from field: %s", field)
-    field = field.strip()
+        db_conn.commit()
+        logger.info("Successfully added %d column(s) to %s", len(missing), table_name)
+        return missing
 
-    # Check for AS alias pattern (case-insensitive)
-    as_pattern = r"\s+AS\s+(\w+)\s*$"
-    as_match = re.search(as_pattern, field, re.IGNORECASE)
-    if as_match:
-        alias = as_match.group(1)
-        logger.debug("Found AS alias: %s -> %s", field, alias)
-        return _sanitize_column_name(alias)
-
-    # No alias, sanitize the field name (handles dots for relationships)
-    return _sanitize_column_name(field)
-
-
-def _parse_select_columns(soql: str) -> List[str]:
-    """Parse SELECT columns from SOQL query.
-
-    Extracts column names from SELECT clause, handling:
-    - Simple fields: Id, Name
-    - Relationship traversals: Account.Name
-    - Aliases: Field AS Alias
-
-    Args:
-        soql: SOQL query string.
-
-    Returns:
-        List of sanitized column names.
-
-    Raises:
-        ValueError: If SOQL has no SELECT clause or is malformed.
-
-    Example:
-        >>> _parse_select_columns("SELECT Id, Name FROM Account")
-        ['id', 'name']
-        >>> _parse_select_columns("SELECT Account.Name AS AccountName FROM Contact")
-        ['accountname']
-    """
-    logger.debug("Parsing SELECT columns from SOQL: %s", soql)
-
-    # Find SELECT clause using regex
-    select_pattern = r"SELECT\s+(.+?)\s+FROM"
-    match = re.search(select_pattern, soql, re.IGNORECASE | re.DOTALL)
-
-    if not match:
-        error_msg = "SOQL query must contain a SELECT ... FROM clause"
-        logger.error("Invalid SOQL: %s", error_msg)
-        raise ValueError(error_msg)
-
-    select_clause = match.group(1)
-    logger.debug("Extracted SELECT clause: %s", select_clause)
-
-    # Split on commas and extract aliases
-    fields = [field.strip() for field in select_clause.split(",") if field.strip()]
-    columns = [_extract_alias(field) for field in fields]
-
-    if not columns:
-        error_msg = "SELECT clause must contain at least one field"
-        logger.error("Invalid SOQL: %s", error_msg)
-        raise ValueError(error_msg)
-
-    logger.info("Parsed %d columns from SOQL: %s", len(columns), columns)
-    return columns
+    except psycopg2.Error as e:
+        db_conn.rollback()
+        logger.error("Failed to add columns to %s: %s", table_name, str(e))
+        raise
+    finally:
+        cursor.close()
 
 
 def create_table_from_query(
@@ -135,14 +96,27 @@ def create_table_from_query(
     db_conn: extensions.connection,
     *,
     if_not_exists: bool = True,
+    infer_aggregate_types: bool = True,
+    type_overrides: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Create a PostgreSQL table from SOQL SELECT columns.
+
+    If the table already exists, adds any missing columns from the SOQL query.
+    This handles schema evolution when new fields are added to the SOQL.
+
+    When infer_aggregate_types=True, detects aggregate functions (COUNT, SUM, AVG)
+    and uses appropriate numeric types (BIGINT for COUNT, NUMERIC for SUM/AVG)
+    instead of TEXT.
 
     Args:
         table_name: PostgreSQL table name (e.g., 'sf_account').
         soql_query: SOQL query to extract columns from.
         db_conn: psycopg2 database connection.
         if_not_exists: If True, use CREATE TABLE IF NOT EXISTS. Default True.
+        infer_aggregate_types: If True, infer numeric types for aggregate functions.
+            Default True. When enabled, COUNT columns use BIGINT, SUM/AVG use NUMERIC.
+        type_overrides: Optional dict mapping column names to PostgreSQL types.
+            Overrides inferred types for specific columns.
 
     Returns:
         True if table was created, False if it already existed.
@@ -152,29 +126,35 @@ def create_table_from_query(
         psycopg2.Error: For database errors.
 
     Example:
-        >>> from sf_utils.db import get_connection, create_table_from_query
-        >>> conn = get_connection()
+        >>> # Basic usage - all TEXT columns
         >>> created = create_table_from_query(
         ...     table_name="sf_account",
-        ...     soql_query="SELECT Id, Name, BillingCity FROM Account",
-        ...     db_conn=conn,
-        ...     if_not_exists=True
+        ...     soql_query="SELECT Id, Name FROM Account",
+        ...     db_conn=conn
         ... )
-        >>> # Creates: CREATE TABLE IF NOT EXISTS sf_account (
-        >>> #   id TEXT PRIMARY KEY,
-        >>> #   name TEXT,
-        >>> #   billingcity TEXT
-        >>> # )
+        >>> # Aggregate query with type inference (total=BIGINT, revenue=NUMERIC)
+        >>> created = create_table_from_query(
+        ...     table_name="sf_stats",
+        ...     soql_query="SELECT Id, COUNT(Id) AS total, SUM(Amount) AS revenue FROM Account",
+        ...     db_conn=conn,
+        ...     infer_aggregate_types=True
+        ... )
     """
     logger.debug(
-        "create_table_from_query: table_name=%s if_not_exists=%s soql=%s",
+        "create_table_from_query: table_name=%s if_not_exists=%s infer_aggregate_types=%s soql=%s",
         table_name,
         if_not_exists,
+        infer_aggregate_types,
         soql_query,
     )
 
-    # Parse columns from SOQL
-    columns = _parse_select_columns(soql_query)
+    # Parse columns from SOQL with type inference if enabled
+    if infer_aggregate_types:
+        column_specs = _parse_select_columns_with_types(soql_query)
+        columns = [spec.name for spec in column_specs]
+    else:
+        columns = _parse_select_columns(soql_query)
+        column_specs = None
 
     # Check if Id column exists (required for PRIMARY KEY)
     if "id" not in columns:
@@ -182,18 +162,30 @@ def create_table_from_query(
         logger.error("Invalid SOQL: %s", error_msg)
         raise ValueError(error_msg)
 
-    # Build CREATE TABLE statement using psycopg2.sql for security
-    # Id column is PRIMARY KEY, all others are TEXT
+    # Build column definitions with type inference
     column_defs = []
-    for col in columns:
-        if col == "id":
-            column_defs.append(
-                sql.SQL("{} TEXT PRIMARY KEY").format(sql.Identifier(col))
-            )
-        else:
-            column_defs.append(
-                sql.SQL("{} TEXT").format(sql.Identifier(col))
-            )
+    for i, col in enumerate(columns):
+        col_type = "TEXT"  # Default
+
+        # Apply type overrides or infer from aggregates
+        if type_overrides and col in type_overrides:
+            col_type = type_overrides[col]
+            logger.debug("Type override for %s: %s", col, col_type)
+        elif infer_aggregate_types and column_specs:
+            spec = column_specs[i]
+            if spec.aggregate_function:
+                inferred_type = infer_aggregate_type(spec.original_expression)
+                if inferred_type:
+                    col_type = inferred_type
+                    logger.debug("Inferred %s for %s (%s)", col_type, col, spec.aggregate_function)
+
+        # Build column definition (id gets PRIMARY KEY constraint)
+        col_def = sql.SQL("{} {}{}").format(
+            sql.Identifier(col),
+            sql.SQL(col_type),
+            sql.SQL(" PRIMARY KEY" if col == "id" else ""),
+        )
+        column_defs.append(col_def)
 
     create_stmt = sql.SQL(
         "CREATE TABLE {if_not_exists} {table} ({columns})"
@@ -203,31 +195,37 @@ def create_table_from_query(
         columns=sql.SQL(", ").join(column_defs),
     )
 
-    # Execute CREATE TABLE
+    # Check if table already exists before attempting CREATE
+    existing_columns = _get_existing_columns(table_name, db_conn)
+    table_existed = len(existing_columns) > 0
+
+    if table_existed:
+        logger.debug("Table %s already exists with %d columns", table_name, len(existing_columns))
+        # Add any missing columns from the SOQL query
+        added = _add_missing_columns(table_name, columns, existing_columns, db_conn)
+        if added:
+            logger.info(
+                "Table %s: added %d new column(s): %s",
+                table_name,
+                len(added),
+                added,
+            )
+        return False  # Table was not newly created
+
+    # Execute CREATE TABLE for new table
     cursor = db_conn.cursor()
     try:
         logger.debug("Executing CREATE TABLE for table: %s with %d columns", table_name, len(columns))
         cursor.execute(create_stmt)
         db_conn.commit()
 
-        # Check if table was actually created (rowcount doesn't work for DDL)
-        # Query pg_catalog to check if table existed before
-        cursor.execute(
-            sql.SQL("SELECT to_regclass({})").format(sql.Literal(table_name))
+        logger.info(
+            "Table created successfully: %s with %d columns: %s",
+            table_name,
+            len(columns),
+            columns,
         )
-        table_exists = cursor.fetchone()[0] is not None
-
-        if table_exists:
-            logger.info(
-                "Table created successfully: %s with %d columns: %s",
-                table_name,
-                len(columns),
-                columns,
-            )
-            return True
-        else:
-            logger.info("Table already existed: %s", table_name)
-            return False
+        return True  # Table was newly created
 
     except psycopg2.Error as e:
         db_conn.rollback()

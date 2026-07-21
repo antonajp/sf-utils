@@ -13,6 +13,7 @@ from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.db import create_table_from_query, get_connection, upsert_records
+from sf_utils.db.schema import _sanitize_column_name
 from sf_utils.exceptions import SalesforceAPIError, SalesforceAuthError, _sanitize_value
 from sf_utils.retry import RetryConfig, DEFAULT_RETRY_CONFIG, with_retry, raise_for_status
 from sf_utils.sync.rest_sync import SyncResult, _inject_incremental_filter
@@ -209,7 +210,7 @@ def create_bulk_query_job(
 def poll_bulk_job(
     job_id: str,
     client: Optional[Salesforce] = None,
-    timeout: float = 600.0,
+    timeout: float = 900.0,
     poll_interval: float = 5.0,
     max_poll_interval: float = 30.0,
     backoff_multiplier: float = 1.5,
@@ -232,7 +233,7 @@ def poll_bulk_job(
     Args:
         job_id: Bulk API 2.0 job ID (e.g., "750xx000000XyzoAAC").
         client: Authenticated Salesforce client. Creates one if not provided.
-        timeout: Maximum time to poll in seconds. Defaults to 600 (10 minutes).
+        timeout: Maximum time to poll in seconds. Defaults to 900 (15 minutes).
             Raises SalesforceAPIError if job doesn't complete within timeout.
         poll_interval: Initial polling interval in seconds. Defaults to 5.
             Increases with exponential backoff on each poll.
@@ -757,7 +758,9 @@ def sync_records_bulk(
     date_field: str = "LastModifiedDate",
     batch_size: int = 1000,
     poll_interval: float = 5.0,
-    timeout: float = 600.0,
+    timeout: float = 900.0,
+    infer_aggregate_types: bool = True,
+    type_overrides: Optional[Dict[str, str]] = None,
     client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
 ) -> SyncResult:
@@ -779,7 +782,11 @@ def sync_records_bulk(
         date_field: Date/datetime field for incremental sync. Defaults to 'LastModifiedDate'.
         batch_size: Number of records to process per batch. Defaults to 1000.
         poll_interval: Initial polling interval in seconds. Defaults to 5.0.
-        timeout: Maximum time to poll job in seconds. Defaults to 600.0 (10 minutes).
+        timeout: Maximum time to poll job in seconds. Defaults to 900.0 (15 minutes).
+        infer_aggregate_types: If True, infer numeric types for aggregate functions (COUNT, SUM, AVG).
+            Default True. COUNT uses BIGINT, SUM/AVG use NUMERIC.
+        type_overrides: Optional dict mapping column names to PostgreSQL types.
+            Overrides inferred types for specific columns.
         client: Authenticated Salesforce client. Creates one if not provided.
         db_conn: Active psycopg2 connection. Creates one if not provided.
 
@@ -913,6 +920,8 @@ def sync_records_bulk(
             soql_query=soql,
             db_conn=db_conn,
             if_not_exists=True,
+            infer_aggregate_types=infer_aggregate_types,
+            type_overrides=type_overrides,
         )
 
         # Download and upsert results in batches
@@ -923,10 +932,11 @@ def sync_records_bulk(
         logger.info("Downloading and processing results: job_id=%s batch_size=%d", job_id, batch_size)
 
         for batch in get_bulk_results(job_id=job_id, client=client, batch_size=batch_size):
-            # Normalize column keys to lowercase
+            # Normalize column keys using same sanitization as table creation
+            # This ensures headers like "CreatedBy.Id" match columns like "createdby_id"
             normalized_batch = []
             for record in batch:
-                normalized_record = {k.lower(): v for k, v in record.items()}
+                normalized_record = {_sanitize_column_name(k): v for k, v in record.items()}
                 normalized_batch.append(normalized_record)
 
             total_records += len(normalized_batch)
