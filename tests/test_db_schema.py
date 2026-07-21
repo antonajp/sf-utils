@@ -1121,6 +1121,90 @@ class TestUpsertRecordsIntegration:
         assert any("sf_account" in args for args in call_args)
 
 
+class TestValidatePostgresType:
+    """SECURITY: Tests for validate_postgres_type function."""
+
+    def test_valid_simple_types(self):
+        """Should accept valid PostgreSQL types."""
+        from sf_utils.db.types import validate_postgres_type
+
+        assert validate_postgres_type("TEXT") == "TEXT"
+        assert validate_postgres_type("INTEGER") == "INTEGER"
+        assert validate_postgres_type("BOOLEAN") == "BOOLEAN"
+        assert validate_postgres_type("JSONB") == "JSONB"
+
+    def test_valid_parameterized_types(self):
+        """Should accept valid parameterized types."""
+        from sf_utils.db.types import validate_postgres_type
+
+        assert validate_postgres_type("VARCHAR(255)") == "VARCHAR(255)"
+        assert validate_postgres_type("NUMERIC(10,2)") == "NUMERIC(10,2)"
+        assert validate_postgres_type("CHAR(50)") == "CHAR(50)"
+
+    def test_case_insensitive(self):
+        """Should normalize to uppercase."""
+        from sf_utils.db.types import validate_postgres_type
+
+        assert validate_postgres_type("text") == "TEXT"
+        assert validate_postgres_type("varchar(100)") == "VARCHAR(100)"
+
+    def test_rejects_sql_injection_semicolon(self):
+        """SECURITY: Should reject SQL injection via semicolon."""
+        from sf_utils.db.types import validate_postgres_type
+
+        with pytest.raises(ValueError, match="dangerous character"):
+            validate_postgres_type("TEXT); DROP TABLE users")
+
+    def test_rejects_sql_injection_comment(self):
+        """SECURITY: Should reject SQL injection via comment markers."""
+        from sf_utils.db.types import validate_postgres_type
+
+        with pytest.raises(ValueError, match="dangerous character"):
+            validate_postgres_type("TEXT -- comment")
+        with pytest.raises(ValueError, match="dangerous character"):
+            validate_postgres_type("TEXT /* block */")
+
+    def test_rejects_sql_injection_quotes(self):
+        """SECURITY: Should reject SQL injection via quotes."""
+        from sf_utils.db.types import validate_postgres_type
+
+        with pytest.raises(ValueError, match="dangerous character"):
+            validate_postgres_type("TEXT'; SELECT * FROM users")
+        with pytest.raises(ValueError, match="dangerous character"):
+            validate_postgres_type('TEXT" OR 1=1')
+
+    def test_rejects_unknown_types(self):
+        """SECURITY: Should reject types not in whitelist."""
+        from sf_utils.db.types import validate_postgres_type
+
+        with pytest.raises(ValueError, match="not in whitelist"):
+            validate_postgres_type("EVIL_TYPE")
+
+    def test_rejects_malformed_parameters(self):
+        """SECURITY: Should reject non-numeric type parameters."""
+        from sf_utils.db.types import validate_postgres_type
+
+        with pytest.raises(ValueError, match="malformed type parameters"):
+            validate_postgres_type("VARCHAR(abc)")
+        # NUMERIC(10;2) is caught by dangerous character check first
+        with pytest.raises(ValueError, match="dangerous character"):
+            validate_postgres_type("NUMERIC(10;2)")
+
+    def test_rejects_empty_string(self):
+        """Should reject empty string."""
+        from sf_utils.db.types import validate_postgres_type
+
+        with pytest.raises(ValueError, match="non-empty string"):
+            validate_postgres_type("")
+
+    def test_rejects_none(self):
+        """Should reject None."""
+        from sf_utils.db.types import validate_postgres_type
+
+        with pytest.raises(ValueError, match="non-empty string"):
+            validate_postgres_type(None)
+
+
 class TestSalesforceTypeToPostgres:
     """Tests for SALESFORCE_TYPE_TO_POSTGRES constant."""
 
@@ -1210,13 +1294,55 @@ class TestGetPostgresType:
         assert get_postgres_type("datetime", type_mapper=custom_mapper) == "TIMESTAMP WITH TIME ZONE"
 
     def test_custom_type_mapper_for_unknown_types(self):
-        """Should allow custom mapper to handle unknown types."""
+        """Should allow custom mapper to handle unknown types with valid PG types."""
         def custom_mapper(sf_type):
             if sf_type == "customtype":
-                return "CUSTOM_PG_TYPE"
+                return "JSONB"  # Use a valid PostgreSQL type
             return None
 
-        assert get_postgres_type("customtype", type_mapper=custom_mapper) == "CUSTOM_PG_TYPE"
+        assert get_postgres_type("customtype", type_mapper=custom_mapper) == "JSONB"
+
+    def test_custom_type_mapper_sql_injection_blocked(self):
+        """SECURITY: Should reject SQL injection via custom type_mapper."""
+        def malicious_mapper(sf_type):
+            return "TEXT); DROP TABLE users; --"
+
+        with pytest.raises(ValueError, match="dangerous character"):
+            get_postgres_type("string", type_mapper=malicious_mapper)
+
+    def test_custom_type_mapper_rejects_unknown_types(self):
+        """SECURITY: Should reject types not in whitelist."""
+        def bad_mapper(sf_type):
+            return "EVIL_TYPE"
+
+        with pytest.raises(ValueError, match="not in whitelist"):
+            get_postgres_type("string", type_mapper=bad_mapper)
+
+    def test_custom_type_mapper_allows_parameterized_types(self):
+        """Should allow safe parameterized types like VARCHAR(255)."""
+        def mapper(sf_type):
+            if sf_type == "string":
+                return "VARCHAR(255)"
+            return None
+
+        assert get_postgres_type("string", type_mapper=mapper) == "VARCHAR(255)"
+
+    def test_custom_type_mapper_allows_numeric_precision(self):
+        """Should allow NUMERIC with precision like NUMERIC(10,2)."""
+        def mapper(sf_type):
+            if sf_type == "currency":
+                return "NUMERIC(18,2)"
+            return None
+
+        assert get_postgres_type("currency", type_mapper=mapper) == "NUMERIC(18,2)"
+
+    def test_custom_type_mapper_rejects_malformed_parameters(self):
+        """SECURITY: Should reject malformed type parameters."""
+        def bad_mapper(sf_type):
+            return "VARCHAR(abc)"  # Non-numeric parameter
+
+        with pytest.raises(ValueError, match="malformed type parameters"):
+            get_postgres_type("string", type_mapper=bad_mapper)
 
 
 class TestCreateTableFromDescribe:

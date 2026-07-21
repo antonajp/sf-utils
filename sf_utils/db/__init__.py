@@ -11,9 +11,11 @@ from sf_utils.db.parser import (
 from sf_utils.db.schema import create_table_from_describe, create_table_from_query, upsert_records
 from sf_utils.db.types import (
     AGGREGATE_FUNCTION_TYPES,
+    ALLOWED_POSTGRES_TYPES,
     SALESFORCE_TYPE_TO_POSTGRES,
     get_postgres_type,
     infer_aggregate_type,
+    validate_postgres_type,
 )
 
 __all__ = [
@@ -33,7 +35,9 @@ __all__ = [
     "_sanitize_column_name",
     # Types
     "AGGREGATE_FUNCTION_TYPES",
+    "ALLOWED_POSTGRES_TYPES",
+    "SALESFORCE_TYPE_TO_POSTGRES",
     "get_postgres_type",
     "infer_aggregate_type",
-    "SALESFORCE_TYPE_TO_POSTGRES",
+    "validate_postgres_type",
 ]
