@@ -290,7 +290,7 @@ def register_status_command(cli_group: click.Group) -> None:
         "--config",
         type=click.Path(path_type=Path),
         default="sync_config.yaml",
-        help="Path to YAML configuration file. Defaults to sync_config.yaml.",
+        help="Path to YAML configuration file. Defaults to projects/sync_config.yaml if exists, else ./sync_config.yaml.",
     )
     @click.option(
         "--verbose",

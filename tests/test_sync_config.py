@@ -17,7 +17,7 @@ from unittest.mock import patch, mock_open
 import pytest
 import yaml
 
-from sf_utils.sync.config import load_sync_config, SyncJobConfig
+from sf_utils.sync.config import load_sync_config, SyncJobConfig, _resolve_config_path
 
 
 @contextmanager
@@ -668,3 +668,215 @@ password: secret123
         assert mock_logger.warning.called
         warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
         assert any("password" in call.lower() or "credential" in call.lower() for call in warning_calls)
+
+
+class TestResolveConfigPath:
+    """Tests for _resolve_config_path() fallback behavior."""
+
+    def test_returns_path_if_exists(self, tmp_path):
+        """Should return original path if file exists."""
+        config_file = tmp_path / "sync_config.yaml"
+        config_file.write_text("syncs: []")
+
+        result = _resolve_config_path(config_file)
+
+        assert result == config_file
+
+    def test_returns_absolute_path_as_is(self, tmp_path):
+        """Should return absolute path without checking projects/ fallback."""
+        # Absolute path that doesn't exist
+        abs_path = tmp_path / "nonexistent_config.yaml"
+
+        result = _resolve_config_path(abs_path)
+
+        assert result == abs_path
+        assert result.is_absolute()
+
+    def test_falls_back_to_projects_directory(self, tmp_path, monkeypatch):
+        """Should fall back to projects/ directory if file exists there."""
+        # Change working directory to tmp_path
+        monkeypatch.chdir(tmp_path)
+
+        # Create projects/ directory with config file
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        projects_config = projects_dir / "sync_config.yaml"
+        projects_config.write_text("syncs: []")
+
+        # Request sync_config.yaml (doesn't exist in root)
+        result = _resolve_config_path("sync_config.yaml")
+
+        assert result == Path("projects/sync_config.yaml")
+
+    def test_returns_original_if_neither_exists(self, tmp_path, monkeypatch):
+        """Should return original path if not found in either location."""
+        monkeypatch.chdir(tmp_path)
+
+        # Neither root nor projects/ has the config
+        result = _resolve_config_path("sync_config.yaml")
+
+        assert result == Path("sync_config.yaml")
+
+    def test_prefers_root_over_projects(self, tmp_path, monkeypatch):
+        """Should prefer root config over projects/ when both exist."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create config in both root and projects/
+        root_config = tmp_path / "sync_config.yaml"
+        root_config.write_text("syncs: []  # root")
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        projects_config = projects_dir / "sync_config.yaml"
+        projects_config.write_text("syncs: []  # projects")
+
+        result = _resolve_config_path("sync_config.yaml")
+
+        # Should use root (exists check returns True for original path)
+        assert result == Path("sync_config.yaml")
+
+
+class TestLoadSyncConfigPathFallback:
+    """Tests for load_sync_config() path fallback behavior."""
+
+    def test_loads_from_projects_directory(self, tmp_path, monkeypatch):
+        """Should load config from projects/ if root doesn't exist."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create projects/ directory with config file
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        projects_config = projects_dir / "sync_config.yaml"
+        projects_config.write_text("""
+syncs:
+  - object_name: Account
+    soql_file: soql/account.soql
+    date_field: LastModifiedDate
+""")
+
+        # Load using default path (root doesn't exist)
+        result = load_sync_config("sync_config.yaml")
+
+        assert len(result) == 1
+        assert result[0].object_name == "Account"
+
+    def test_loads_from_root_when_exists(self, tmp_path, monkeypatch):
+        """Should load from root when it exists, ignoring projects/."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create config in root
+        root_config = tmp_path / "sync_config.yaml"
+        root_config.write_text("""
+syncs:
+  - object_name: RootAccount
+    soql_file: soql/root.soql
+    date_field: LastModifiedDate
+""")
+
+        # Also create in projects/ (should be ignored)
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        projects_config = projects_dir / "sync_config.yaml"
+        projects_config.write_text("""
+syncs:
+  - object_name: ProjectsAccount
+    soql_file: soql/projects.soql
+    date_field: LastModifiedDate
+""")
+
+        result = load_sync_config("sync_config.yaml")
+
+        assert len(result) == 1
+        assert result[0].object_name == "RootAccount"
+
+    def test_explicit_config_bypasses_fallback(self, tmp_path, monkeypatch):
+        """Should use explicit --config path without fallback."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create custom config location
+        custom_dir = tmp_path / "custom"
+        custom_dir.mkdir()
+        custom_config = custom_dir / "my_config.yaml"
+        custom_config.write_text("""
+syncs:
+  - object_name: CustomAccount
+    soql_file: soql/custom.soql
+    date_field: LastModifiedDate
+""")
+
+        result = load_sync_config(custom_config)
+
+        assert len(result) == 1
+        assert result[0].object_name == "CustomAccount"
+
+    def test_error_message_mentions_both_paths(self, tmp_path, monkeypatch):
+        """Should mention both paths in error when config not found."""
+        monkeypatch.chdir(tmp_path)
+
+        # No config file exists anywhere
+        with pytest.raises(FileNotFoundError) as exc_info:
+            load_sync_config("sync_config.yaml")
+
+        error_msg = str(exc_info.value)
+        # Should mention both locations checked
+        assert "projects" in error_msg.lower()
+        assert "sync_config.yaml" in error_msg
+
+
+class TestConfigPathSecurity:
+    """Tests for security protections in config path handling."""
+
+    def test_rejects_symlink_config_file(self, tmp_path, monkeypatch):
+        """Should reject symlinks for security (prevents arbitrary file read)."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create a target file
+        target_file = tmp_path / "target.yaml"
+        target_file.write_text("syncs: []")
+
+        # Create symlink to target
+        symlink = tmp_path / "sync_config.yaml"
+        symlink.symlink_to(target_file)
+
+        with pytest.raises(ValueError, match="Symlinks are not allowed"):
+            _resolve_config_path("sync_config.yaml")
+
+    def test_rejects_symlink_in_projects(self, tmp_path, monkeypatch):
+        """Should reject symlinks in projects/ directory."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create projects/ directory with symlink
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        target_file = tmp_path / "target.yaml"
+        target_file.write_text("syncs: []")
+
+        symlink = projects_dir / "sync_config.yaml"
+        symlink.symlink_to(target_file)
+
+        with pytest.raises(ValueError, match="Symlinks are not allowed"):
+            _resolve_config_path("sync_config.yaml")
+
+    def test_rejects_path_traversal_attempts(self, tmp_path, monkeypatch):
+        """Should reject paths containing '..' components."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create config file one level up
+        parent_config = tmp_path.parent / "config.yaml"
+        parent_config.write_text("syncs: []")
+
+        try:
+            with pytest.raises(ValueError, match="Path traversal detected"):
+                load_sync_config("../config.yaml")
+        finally:
+            # Cleanup
+            if parent_config.exists():
+                parent_config.unlink()
+
+    def test_rejects_nested_path_traversal(self, tmp_path, monkeypatch):
+        """Should reject nested path traversal attempts."""
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValueError, match="Path traversal detected"):
+            load_sync_config("foo/../../../etc/passwd")

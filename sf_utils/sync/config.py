@@ -13,6 +13,63 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+def _resolve_config_path(config_path: Union[str, Path]) -> Path:
+    """Resolve config path with fallback to projects/ directory.
+
+    Implements precedence order:
+    1. Explicit path (if exists or is absolute)
+    2. projects/{filename} (if exists)
+    3. Original path (caller handles FileNotFoundError)
+
+    Args:
+        config_path: Path to config file (relative or absolute).
+
+    Returns:
+        Resolved Path object. May not exist - caller must handle FileNotFoundError.
+
+    Raises:
+        ValueError: If path is a symlink (security protection).
+    """
+    path = Path(config_path)
+
+    # If path exists or is absolute, use it as-is
+    if path.exists():
+        # SECURITY: Reject symlinks to prevent reading arbitrary files
+        if path.is_symlink():
+            resolved = path.resolve()
+            logger.warning(
+                "SECURITY: Config path is a symlink: %s -> %s. Rejecting.",
+                path, resolved
+            )
+            raise ValueError(f"Symlinks are not allowed for security reasons: {path}")
+        logger.debug("Config path exists, using: %s", path)
+        return path
+
+    if path.is_absolute():
+        logger.debug("Config path is absolute, using as-is: %s", path)
+        return path
+
+    # Try projects/ directory fallback
+    projects_path = Path("projects") / path.name
+    if projects_path.exists():
+        # SECURITY: Reject symlinks in fallback path
+        if projects_path.is_symlink():
+            resolved = projects_path.resolve()
+            logger.warning(
+                "SECURITY: Config path is a symlink: %s -> %s. Rejecting.",
+                projects_path, resolved
+            )
+            raise ValueError(f"Symlinks are not allowed for security reasons: {projects_path}")
+        logger.debug(
+            "Config not found at %s, using fallback: %s", path, projects_path
+        )
+        return projects_path
+
+    # Return original path (caller handles FileNotFoundError)
+    logger.debug("Config not found at %s or %s, returning original", path, projects_path)
+    return path
+
+
 @dataclass
 class SyncJobConfig:
     """Configuration for a Salesforce sync job.
@@ -137,15 +194,26 @@ def load_sync_config(
             enabled: false
         ```
 
+    Config Path Resolution:
+        The config_path is resolved with fallback precedence:
+        1. Explicit path (if exists or is absolute)
+        2. projects/{filename} (if exists)
+        3. Original path (raises FileNotFoundError)
+
+        This allows placing sync_config.yaml in the gitignored projects/
+        directory for user-specific configurations.
+
     Security Notes:
         - Uses yaml.safe_load() to prevent arbitrary code execution
         - Validates config_path to prevent path traversal attacks
         - Warns if credential-like values detected in config
     """
-    # Convert to Path for cross-platform compatibility
-    path = Path(config_path)
+    # Resolve config path with fallback to projects/ directory
+    original_path = Path(config_path)
+    path = _resolve_config_path(config_path)
 
     logger.debug("Loading sync configuration from: %s", path)
+    logger.debug("Original path requested: %s", original_path)
     logger.debug("Include disabled syncs: %s", include_disabled)
 
     # Validate path to prevent path traversal
@@ -154,10 +222,13 @@ def load_sync_config(
         resolved_path = path.resolve()
         logger.debug("Resolved config path: %s", resolved_path)
 
-        # Check for suspicious path components (basic path traversal check)
-        path_str = str(resolved_path)
-        if ".." in path.parts:
-            logger.warning("Path contains '..' component: %s", path)
+        # SECURITY: Block path traversal attempts
+        if ".." in path.parts or ".." in original_path.parts:
+            logger.error("SECURITY: Path contains '..' component, rejecting: %s", path)
+            raise ValueError(
+                f"Path traversal detected: {config_path}\n"
+                f"Config paths cannot contain '..' components for security."
+            )
 
     except (OSError, RuntimeError) as e:
         logger.error("Invalid config path: %s - %s", path, e)
@@ -166,11 +237,25 @@ def load_sync_config(
     # Check file exists
     if not path.exists():
         logger.error("Config file not found: %s", path)
-        raise FileNotFoundError(
-            f"Sync configuration file not found: {path}\n"
-            f"Expected path: {path.resolve()}\n"
-            f"Please create a YAML config file with sync job definitions."
-        )
+        # Build error message showing locations checked
+        projects_path = Path("projects") / original_path.name
+        if original_path.is_absolute():
+            # Absolute path was provided - only checked one location
+            error_msg = (
+                f"Sync configuration file not found: {path}\n"
+                f"Please create a YAML config file with sync job definitions."
+            )
+        else:
+            # Relative path - both locations were checked
+            # _resolve_config_path checks: original first, then projects/ fallback
+            error_msg = (
+                f"Sync configuration file not found.\n"
+                f"Checked locations:\n"
+                f"  1. {original_path} (original path)\n"
+                f"  2. projects/{original_path.name} (fallback)\n"
+                f"Please create a YAML config file in one of these locations."
+            )
+        raise FileNotFoundError(error_msg)
 
     # Check file is not a directory
     if path.is_dir():
@@ -233,14 +318,21 @@ def load_sync_config(
     # Parse each sync job
     sync_configs = []
     for idx, sync_dict in enumerate(syncs_data):
-        logger.debug("Processing sync job %d: %s", idx, sync_dict)
-
         if not isinstance(sync_dict, dict):
             logger.error("Sync job %d must be a mapping (dict), got: %s", idx, type(sync_dict).__name__)
             raise ValueError(
                 f"Sync job at index {idx} must be a YAML mapping (dict), "
                 f"got: {type(sync_dict).__name__}"
             )
+
+        # SECURITY: Only log safe fields (avoid credential leakage)
+        logger.debug(
+            "Processing sync job %d: object_name=%s mode=%s enabled=%s",
+            idx,
+            sync_dict.get("object_name"),
+            sync_dict.get("mode"),
+            sync_dict.get("enabled"),
+        )
 
         # Validate required fields
         required_fields = {"object_name", "soql_file", "date_field"}
