@@ -759,6 +759,8 @@ def sync_records_bulk(
     batch_size: int = 1000,
     poll_interval: float = 5.0,
     timeout: float = 900.0,
+    infer_aggregate_types: bool = True,
+    type_overrides: Optional[Dict[str, str]] = None,
     client: Optional[Salesforce] = None,
     db_conn: Optional[extensions.connection] = None,
 ) -> SyncResult:
@@ -781,6 +783,10 @@ def sync_records_bulk(
         batch_size: Number of records to process per batch. Defaults to 1000.
         poll_interval: Initial polling interval in seconds. Defaults to 5.0.
         timeout: Maximum time to poll job in seconds. Defaults to 900.0 (15 minutes).
+        infer_aggregate_types: If True, infer numeric types for aggregate functions (COUNT, SUM, AVG).
+            Default True. COUNT uses BIGINT, SUM/AVG use NUMERIC.
+        type_overrides: Optional dict mapping column names to PostgreSQL types.
+            Overrides inferred types for specific columns.
         client: Authenticated Salesforce client. Creates one if not provided.
         db_conn: Active psycopg2 connection. Creates one if not provided.
 
@@ -914,6 +920,8 @@ def sync_records_bulk(
             soql_query=soql,
             db_conn=db_conn,
             if_not_exists=True,
+            infer_aggregate_types=infer_aggregate_types,
+            type_overrides=type_overrides,
         )
 
         # Download and upsert results in batches
