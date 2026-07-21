@@ -51,7 +51,6 @@ def _sanitize_column_name(name: str) -> str:
         >>> _sanitize_column_name("Account.Name")
         'account_name'
     """
-    logger.debug("Sanitizing column name: %s", name)
     # Convert to lowercase
     sanitized = name.lower()
     # Replace special chars (spaces, dots, etc.) with underscores
@@ -59,7 +58,6 @@ def _sanitize_column_name(name: str) -> str:
     sanitized = re.sub(r"[^a-z0-9_]", "_", sanitized)
     # Remove leading/trailing underscores only
     sanitized = sanitized.strip("_")
-    logger.debug("Sanitized column name: %s -> %s", name, sanitized)
     return sanitized
 
 

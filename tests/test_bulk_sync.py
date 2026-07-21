@@ -2066,3 +2066,270 @@ class TestGetBulkResultsConfig:
 
         # Verify get_client was called
         mock_get_client.assert_called_once()
+
+
+class TestGetBulkResultsPagination:
+    """Tests for pagination using Sforce-Locator header."""
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_fetches_multiple_pages_with_locator(self, mock_get, mock_client):
+        """Should fetch all pages using Sforce-Locator header."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                # First page: 2 records, locator for next page
+                csv_data = "Id,Name\n001xxx,Page1Record1\n002xxx,Page1Record2"
+                mock_response.headers = {'Sforce-Locator': 'ABC123'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+            elif call_count == 2:
+                # Second page: 2 records, locator for next page
+                csv_data = "Id,Name\n003xxx,Page2Record1\n004xxx,Page2Record2"
+                mock_response.headers = {'Sforce-Locator': 'DEF456'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+            else:
+                # Third page: 1 record, no more pages
+                csv_data = "Id,Name\n005xxx,Page3Record1"
+                mock_response.headers = {'Sforce-Locator': 'null'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        # Collect all records
+        all_records = []
+        for batch in get_bulk_results("750xx0000004567AAA", client=mock_client, batch_size=10):
+            all_records.extend(batch)
+
+        # Should fetch all 3 pages
+        assert call_count == 3
+        assert len(all_records) == 5
+        assert all_records[0]["Name"] == "Page1Record1"
+        assert all_records[2]["Name"] == "Page2Record1"
+        assert all_records[4]["Name"] == "Page3Record1"
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_stops_pagination_when_locator_null(self, mock_get, mock_client):
+        """Should stop fetching pages when Sforce-Locator is 'null'."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                # First page with locator
+                csv_data = "Id,Name\n001xxx,Record1"
+                mock_response.headers = {'Sforce-Locator': 'ABC123'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+            else:
+                # Second page, locator is null - no more pages
+                csv_data = "Id,Name\n002xxx,Record2"
+                mock_response.headers = {'Sforce-Locator': 'null'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        all_records = []
+        for batch in get_bulk_results("750xx0000004567AAA", client=mock_client):
+            all_records.extend(batch)
+
+        # Should stop after 2 pages
+        assert call_count == 2
+        assert len(all_records) == 2
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_stops_pagination_when_locator_absent(self, mock_get, mock_client):
+        """Should stop fetching pages when Sforce-Locator header is missing."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        # No Sforce-Locator header
+        mock_response.headers = {}
+        csv_data = "Id,Name\n001xxx,Record1"
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        all_records = []
+        for batch in get_bulk_results("750xx0000004567AAA", client=mock_client):
+            all_records.extend(batch)
+
+        # Should only make 1 request (no locator)
+        assert mock_get.call_count == 1
+        assert len(all_records) == 1
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_includes_locator_in_url_query_param(self, mock_get, mock_client):
+        """Should include locator as URL query parameter in subsequent requests."""
+        call_count = 0
+
+        def mock_get_fn(url, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                # First page - no locator in URL
+                assert "?locator=" not in url
+                csv_data = "Id,Name\n001xxx,Record1"
+                mock_response.headers = {'Sforce-Locator': 'ABC123XYZ'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+            else:
+                # Second page - locator should be in URL
+                assert "?locator=ABC123XYZ" in url
+                csv_data = "Id,Name\n002xxx,Record2"
+                mock_response.headers = {'Sforce-Locator': 'null'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        list(get_bulk_results("750xx0000004567AAA", client=mock_client))
+
+        # Verify both requests were made
+        assert call_count == 2
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_validates_locator_format(self, mock_get, mock_client):
+        """Should validate locator format and raise error for invalid characters."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        # Locator with invalid characters (potential injection)
+        mock_response.headers = {'Sforce-Locator': 'ABC123; DROP TABLE users;'}
+        csv_data = "Id,Name\n001xxx,Record1"
+        mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+        mock_get.return_value = mock_response
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        # Should raise error on invalid locator format
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            for batch in get_bulk_results("750xx0000004567AAA", client=mock_client):
+                pass
+
+        assert "Invalid Sforce-Locator format" in str(exc_info.value)
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_max_pages_limit_prevents_infinite_loop(self, mock_get, mock_client):
+        """Should raise error if max_pages limit is exceeded."""
+        def mock_get_fn(*args, **kwargs):
+            mock_response = Mock()
+            mock_response.status_code = 200
+            # Always return a locator (simulating infinite pagination)
+            mock_response.headers = {'Sforce-Locator': 'INFINITE'}
+            csv_data = "Id,Name\n001xxx,Record"
+            mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        # Set low max_pages for testing
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            for batch in get_bulk_results("750xx0000004567AAA", client=mock_client, max_pages=3):
+                pass
+
+        assert "Max pages limit" in str(exc_info.value)
+        assert mock_get.call_count == 3
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_logs_csv_headers_at_debug_level_once(self, mock_get, mock_client, caplog):
+        """Should log CSV headers at DEBUG level only once (after first page)."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                csv_data = "Id,Name,Industry\n001xxx,Test,Tech"
+                mock_response.headers = {'Sforce-Locator': 'ABC'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+            else:
+                csv_data = "Id,Name,Industry\n002xxx,Test2,Retail"
+                mock_response.headers = {'Sforce-Locator': 'null'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        with caplog.at_level(logging.DEBUG):
+            for batch in get_bulk_results("750xx0000004567AAA", client=mock_client):
+                pass
+
+        # Should log headers exactly once
+        header_logs = [r for r in caplog.records if "CSV headers" in r.message]
+        assert len(header_logs) == 1
+        assert "['Id', 'Name', 'Industry']" in header_logs[0].message
+
+    @patch('sf_utils.sync.bulk_sync.requests.get')
+    def test_logs_first_row_metadata_without_pii(self, mock_get, mock_client, caplog):
+        """Should log first row metadata (column count only) without actual data."""
+        call_count = 0
+
+        def mock_get_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+
+            if call_count == 1:
+                csv_data = "Id,Name,Email\n001xxx,John Doe,john@example.com"
+                mock_response.headers = {'Sforce-Locator': 'ABC'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+            else:
+                csv_data = "Id,Name,Email\n002xxx,Jane Smith,jane@example.com"
+                mock_response.headers = {'Sforce-Locator': 'null'}
+                mock_response.iter_lines.return_value = iter(csv_data.split('\n'))
+
+            return mock_response
+
+        mock_get.side_effect = mock_get_fn
+
+        from sf_utils.sync.bulk_sync import get_bulk_results
+
+        with caplog.at_level(logging.DEBUG):
+            for batch in get_bulk_results("750xx0000004567AAA", client=mock_client):
+                pass
+
+        # Should log first row metadata for each page
+        metadata_logs = [r for r in caplog.records if "First row metadata" in r.message]
+        assert len(metadata_logs) == 2
+
+        # Should include column count
+        assert "column_count=3" in metadata_logs[0].message
+
+        # Should NOT include actual row data (PII)
+        assert "John Doe" not in caplog.text
+        assert "john@example.com" not in caplog.text
+        assert "Jane Smith" not in caplog.text
