@@ -6,6 +6,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import quote
 
 import requests
 from psycopg2 import extensions
@@ -496,12 +497,16 @@ def get_bulk_results(
     job_id: str,
     client: Optional[Salesforce] = None,
     batch_size: int = 1000,
+    max_pages: int = 10000,
 ) -> Iterator[List[Dict[str, Any]]]:
     """Download and parse CSV results from a completed Bulk API 2.0 job.
 
     Retrieves query results from a completed Bulk API 2.0 job as CSV data and
     yields batches of records as dictionaries. Results are streamed to handle
     large datasets efficiently without loading all data into memory.
+
+    Handles pagination automatically using the Sforce-Locator header to fetch
+    all result pages until no more data is available.
 
     The job must be in "JobComplete" state before calling this function. Use
     poll_bulk_job() to wait for job completion if needed.
@@ -511,6 +516,8 @@ def get_bulk_results(
         client: Authenticated Salesforce client. Creates one if not provided.
         batch_size: Number of records to yield per batch. Defaults to 1000.
             Larger batches reduce overhead but consume more memory.
+        max_pages: Maximum number of result pages to fetch. Defaults to 10000.
+            Prevents infinite loops if pagination logic fails.
 
     Yields:
         Lists of dictionaries, where each dictionary represents one record with
@@ -520,7 +527,8 @@ def get_bulk_results(
     Raises:
         ValueError: If job_id is empty or batch_size is invalid.
         SalesforceAuthError: If authentication fails (401/403).
-        SalesforceAPIError: If results download fails or HTTP error occurs.
+        SalesforceAPIError: If results download fails, HTTP error occurs, or
+            max_pages limit is exceeded.
 
     Example:
         >>> from sf_utils.sync import create_bulk_query_job, poll_bulk_job, get_bulk_results
@@ -532,14 +540,14 @@ def get_bulk_results(
         ... )
         >>> job_info = poll_bulk_job(job_id)
         >>>
-        >>> # Download results in batches
+        >>> # Download results in batches (automatically handles pagination)
         >>> total_records = 0
         >>> for batch in get_bulk_results(job_id, batch_size=500):
         ...     total_records += len(batch)
         ...     # Process batch (insert to DB, export to CSV, etc.)
         ...     process_batch(batch)
         >>> print(f"Processed {total_records} records")
-        Processed 15000 records
+        Processed 150000 records
         >>>
         >>> # Access individual records
         >>> for batch in get_bulk_results(job_id):
@@ -551,202 +559,319 @@ def get_bulk_results(
     Notes:
         - Results are returned as CSV and parsed into dictionaries
         - Uses streaming to handle large result sets (up to 150M records)
+        - Automatically fetches all pages using Sforce-Locator header
         - Malformed CSV rows are logged as WARNING and skipped
         - Progress is logged every batch (INFO level)
         - HTTP request timeout is 300 seconds (5 minutes)
         - Results must be downloaded within 7 days of job completion
         - CSV field values are returned as strings (no type conversion)
+        - Locator values are validated for security (alphanumeric + limited special chars)
     """
     # Validate inputs
     if not job_id or not job_id.strip():
         raise ValueError("job_id cannot be empty")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    if max_pages <= 0:
+        raise ValueError("max_pages must be positive")
 
     # Initialize client if not provided
     if client is None:
         client = get_client()
 
     logger.debug(
-        "Downloading Bulk API 2.0 results: job_id=%s, batch_size=%d",
+        "Downloading Bulk API 2.0 results: job_id=%s, batch_size=%d, max_pages=%d",
         job_id,
-        batch_size
+        batch_size,
+        max_pages
     )
 
-    # Construct Bulk API 2.0 endpoint for results
-    # Format: https://{instance}/services/data/{version}/jobs/query/{job_id}/results
-    # simple-salesforce uses sf_version (without 'v' prefix) and sf_instance
+    # Prepare base URL and headers
     version = client.sf_version
-    url = f"https://{client.sf_instance}/services/data/v{version}/jobs/query/{job_id}/results"
+    base_url = f"https://{client.sf_instance}/services/data/v{version}/jobs/query/{job_id}/results"
 
-    # Prepare headers for CSV response
     headers = {
         "Authorization": f"Bearer {client.session_id}",
         "Accept": "text/csv"
     }
 
-    logger.debug("GET %s, Accept=text/csv", url)
+    # Pagination state
+    locator = None
+    page_count = 0
+    total_processed = 0
+    headers_logged = False
 
-    # Stream response to handle large result sets
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            stream=True,
-            proxies=client.proxies if hasattr(client, 'proxies') else None,
-            timeout=300  # 5 minutes for large downloads
-        )
-    except requests.exceptions.RequestException as e:
-        logger.error(
-            "HTTP request failed during results download: job_id=%s, error=%s",
-            job_id,
-            str(e)
-        )
-        raise SalesforceAPIError(
-            message=f"Failed to download Bulk API 2.0 results: {str(e)}",
-            status_code=None,
-            response_body={"job_id": job_id, "error": str(e)}
-        )
+    # Pattern to validate Sforce-Locator format
+    # Allow alphanumeric, hyphens, underscores, and common safe characters
+    # Reject anything that could be used for injection attacks
+    LOCATOR_PATTERN = re.compile(r'^[A-Za-z0-9_\-]+$')
 
-    # Check for HTTP errors
-    status_code = response.status_code
-    if status_code >= 400:
-        # Try to parse error response (may be JSON or text)
-        try:
-            error_body = response.json()
-            error_message = error_body.get('message', error_body.get('exceptionMessage', 'Unknown error'))
-        except Exception:
-            error_body = {"error": response.text}
-            error_message = response.text or 'Unknown error'
+    while page_count < max_pages:
+        page_count += 1
 
-        logger.debug(
-            "Results download error response: job_id=%s, status=%d, body=%s",
-            job_id,
-            status_code,
-            str(_sanitize_value(error_body))[:200]
-        )
+        # Construct URL with locator if available
+        if locator:
+            # Validate locator format before using in URL
+            if not LOCATOR_PATTERN.match(locator):
+                logger.error(
+                    "Invalid Sforce-Locator format detected: job_id=%s, locator=%s, page=%d",
+                    job_id,
+                    locator,
+                    page_count
+                )
+                raise SalesforceAPIError(
+                    message=f"Invalid Sforce-Locator format: {locator}",
+                    status_code=None,
+                    response_body={"job_id": job_id, "locator": locator, "page": page_count}
+                )
 
-        # Handle authentication errors
-        if status_code in (401, 403):
-            logger.error(
-                "Bulk API 2.0 authentication failed during results download: job_id=%s, status=%d, message=%s",
+            url = f"{base_url}?locator={quote(locator)}"
+            logger.debug(
+                "Fetching page %d with locator: job_id=%s, locator=%s",
+                page_count,
                 job_id,
+                locator
+            )
+        else:
+            url = base_url
+            logger.debug("Fetching page %d (initial): job_id=%s", page_count, job_id)
+
+        logger.debug("GET %s, Accept=text/csv", url)
+
+        # Stream response to handle large result sets
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                stream=True,
+                proxies=client.proxies if hasattr(client, 'proxies') else None,
+                timeout=300  # 5 minutes for large downloads
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error(
+                "HTTP request failed during results download: job_id=%s, page=%d, error=%s",
+                job_id,
+                page_count,
+                str(e)
+            )
+            raise SalesforceAPIError(
+                message=f"Failed to download Bulk API 2.0 results: {str(e)}",
+                status_code=None,
+                response_body={"job_id": job_id, "page": page_count, "error": str(e)}
+            )
+
+        # Check for HTTP errors
+        status_code = response.status_code
+        if status_code >= 400:
+            # Try to parse error response (may be JSON or text)
+            try:
+                error_body = response.json()
+                error_message = error_body.get('message', error_body.get('exceptionMessage', 'Unknown error'))
+            except Exception:
+                error_body = {"error": response.text}
+                error_message = response.text or 'Unknown error'
+
+            logger.debug(
+                "Results download error response: job_id=%s, page=%d, status=%d, body=%s",
+                job_id,
+                page_count,
+                status_code,
+                str(_sanitize_value(error_body))[:200]
+            )
+
+            # Handle authentication errors
+            if status_code in (401, 403):
+                logger.error(
+                    "Bulk API 2.0 authentication failed during results download: job_id=%s, page=%d, status=%d, message=%s",
+                    job_id,
+                    page_count,
+                    status_code,
+                    error_message
+                )
+                raise SalesforceAuthError(
+                    message=error_message,
+                    status_code=status_code,
+                    response_body=error_body
+                )
+
+            # Handle other errors
+            logger.error(
+                "Bulk API 2.0 results download failed: job_id=%s, page=%d, status=%d, message=%s",
+                job_id,
+                page_count,
                 status_code,
                 error_message
             )
-            raise SalesforceAuthError(
-                message=error_message,
+            raise SalesforceAPIError(
+                message=f"Failed to download Bulk API 2.0 results: {error_message}",
                 status_code=status_code,
                 response_body=error_body
             )
 
-        # Handle other errors
-        logger.error(
-            "Bulk API 2.0 results download failed: job_id=%s, status=%d, message=%s",
+        # Extract Sforce-Locator header for next page
+        next_locator = response.headers.get('Sforce-Locator')
+        logger.debug(
+            "Page %d response headers: job_id=%s, Sforce-Locator=%s",
+            page_count,
             job_id,
-            status_code,
-            error_message
-        )
-        raise SalesforceAPIError(
-            message=f"Failed to download Bulk API 2.0 results: {error_message}",
-            status_code=status_code,
-            response_body=error_body
+            next_locator if next_locator else "null"
         )
 
-    # Extract total record count from headers if available
-    # Salesforce may provide Sforce-NumberOfRecords header
-    total_records = None
-    if 'Sforce-NumberOfRecords' in response.headers:
-        try:
-            total_records = int(response.headers['Sforce-NumberOfRecords'])
-            logger.debug(
-                "Total records from headers: job_id=%s, total=%d",
-                job_id,
-                total_records
-            )
-        except (ValueError, TypeError):
-            pass
-
-    logger.info(
-        "Starting CSV results stream: job_id=%s, total_records=%s",
-        job_id,
-        total_records if total_records is not None else "unknown"
-    )
-
-    # Process CSV in batches
-    # Use iter_lines with decode_unicode for text processing
-    lines = response.iter_lines(decode_unicode=True)
-
-    # Create CSV DictReader to parse headers and rows
-    try:
-        reader = csv.DictReader(lines)
-    except Exception as e:
-        logger.error(
-            "Failed to create CSV reader: job_id=%s, error=%s",
-            job_id,
-            str(e)
-        )
-        raise SalesforceAPIError(
-            message=f"Failed to parse CSV results: {str(e)}",
-            status_code=status_code,
-            response_body={"job_id": job_id, "error": str(e)}
-        )
-
-    # Yield records in batches
-    batch = []
-    total_processed = 0
-    row_num = 0
-
-    for row in reader:
-        row_num += 1
-
-        # Validate row
-        if not row:
-            logger.warning(
-                "Skipping empty row: job_id=%s, row_num=%d",
-                job_id,
-                row_num
-            )
-            continue
-
-        try:
-            # Add row to current batch
-            batch.append(row)
-            total_processed += 1
-
-            # Yield batch when full
-            if len(batch) >= batch_size:
-                logger.info(
-                    "Retrieved %d/%s records (batch of %d)",
-                    total_processed,
-                    total_records if total_records is not None else "?",
-                    len(batch)
+        # Extract total record count from headers if available (first page only)
+        if page_count == 1 and 'Sforce-NumberOfRecords' in response.headers:
+            try:
+                total_records = int(response.headers['Sforce-NumberOfRecords'])
+                logger.debug(
+                    "Total records from headers: job_id=%s, total=%d",
+                    job_id,
+                    total_records
                 )
-                yield batch
-                batch = []
+            except (ValueError, TypeError):
+                total_records = None
+        else:
+            total_records = None
 
-        except Exception as e:
-            logger.warning(
-                "Malformed CSV row skipped: job_id=%s, row_num=%d, error=%s",
+        if page_count == 1:
+            logger.info(
+                "Starting CSV results stream: job_id=%s, total_records=%s",
                 job_id,
-                row_num,
+                total_records if total_records is not None else "unknown"
+            )
+
+        # Process CSV in batches
+        # Use iter_lines with decode_unicode for text processing
+        lines = response.iter_lines(decode_unicode=True)
+
+        # Create CSV DictReader to parse headers and rows
+        try:
+            reader = csv.DictReader(lines)
+        except Exception as e:
+            logger.error(
+                "Failed to create CSV reader: job_id=%s, page=%d, error=%s",
+                job_id,
+                page_count,
                 str(e)
             )
-            continue
+            raise SalesforceAPIError(
+                message=f"Failed to parse CSV results: {str(e)}",
+                status_code=status_code,
+                response_body={"job_id": job_id, "page": page_count, "error": str(e)}
+            )
 
-    # Yield final partial batch if any
-    if batch:
+        # Log CSV headers once at DEBUG level (after DictReader creation)
+        if not headers_logged and reader.fieldnames:
+            logger.debug(
+                "CSV headers: job_id=%s, columns=%s",
+                job_id,
+                reader.fieldnames
+            )
+            headers_logged = True
+
+        # Yield records in batches
+        batch = []
+        page_row_count = 0
+        first_row_logged = False
+
+        for row in reader:
+            page_row_count += 1
+
+            # Log first row metadata at DEBUG (column count only - NO PII)
+            if not first_row_logged:
+                logger.debug(
+                    "First row metadata: job_id=%s, page=%d, column_count=%d",
+                    job_id,
+                    page_count,
+                    len(row)
+                )
+                first_row_logged = True
+
+            # Validate row
+            if not row:
+                logger.warning(
+                    "Skipping empty row: job_id=%s, page=%d, row_num=%d",
+                    job_id,
+                    page_count,
+                    page_row_count
+                )
+                continue
+
+            try:
+                # Add row to current batch
+                batch.append(row)
+                total_processed += 1
+
+                # Yield batch when full
+                if len(batch) >= batch_size:
+                    logger.info(
+                        "Retrieved %d records (page %d, batch of %d)",
+                        total_processed,
+                        page_count,
+                        len(batch)
+                    )
+                    yield batch
+                    batch = []
+
+            except Exception as e:
+                logger.warning(
+                    "Malformed CSV row skipped: job_id=%s, page=%d, row_num=%d, error=%s",
+                    job_id,
+                    page_count,
+                    page_row_count,
+                    str(e)
+                )
+                continue
+
+        # Yield final partial batch for this page if any
+        if batch:
+            logger.info(
+                "Retrieved %d records (page %d, batch of %d)",
+                total_processed,
+                page_count,
+                len(batch)
+            )
+            yield batch
+            batch = []
+
         logger.info(
-            "Retrieved %d/%s records (final batch of %d)",
-            total_processed,
-            total_records if total_records is not None else "?",
-            len(batch)
+            "Page %d complete: job_id=%s, page_rows=%d, total_rows=%d",
+            page_count,
+            job_id,
+            page_row_count,
+            total_processed
         )
-        yield batch
+
+        # Check if there are more pages
+        # Sforce-Locator is "null" (string) or absent when no more pages
+        if not next_locator or next_locator.lower() == "null":
+            logger.info(
+                "No more pages: job_id=%s, total_pages=%d, total_records=%d",
+                job_id,
+                page_count,
+                total_processed
+            )
+            break
+
+        # Update locator for next iteration
+        locator = next_locator
+
+    # Check if we hit max_pages limit (possible infinite loop)
+    if page_count >= max_pages:
+        logger.error(
+            "Max pages limit reached: job_id=%s, max_pages=%d, total_records=%d",
+            job_id,
+            max_pages,
+            total_processed
+        )
+        raise SalesforceAPIError(
+            message=f"Max pages limit ({max_pages}) exceeded for job {job_id}",
+            status_code=None,
+            response_body={"job_id": job_id, "max_pages": max_pages, "total_processed": total_processed}
+        )
 
     logger.info(
-        "Bulk API 2.0 results download complete: job_id=%s, total_records=%d",
+        "Bulk API 2.0 results download complete: job_id=%s, total_pages=%d, total_records=%d",
         job_id,
+        page_count,
         total_processed
     )
 
