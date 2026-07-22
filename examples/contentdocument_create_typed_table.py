@@ -5,9 +5,9 @@ conn = get_connection();
 client = get_client();
 
 create_table_from_describe(
-    table_name="sf_content_document__c",
+    table_name="sf_contentdocument",
     sobject_type="ContentDocument",
-    fields=["id", "ArchivedById", "ArchivedDate", "ContentAssetId", "ContentModifiedDate", "ContentSize", "ContentSizeLong", "CreatedById", "CreatedDate", "FileExtension", "FileType", "LastModifiedById", "LastModifiedDate", "LastReferencedDate", "LastViewedDate", "OwnerId", "ParentId", "PublishStatus", "Title"],
+    fields=["id", "ContentAssetId", "ContentModifiedDate", "ContentSize", "CreatedById", "CreatedDate", "FileExtension", "FileType", "LastModifiedById", "LastModifiedDate", "OwnerId", "ParentId", "PublishStatus", "Title"],
     client=client,
     db_conn=conn
 )

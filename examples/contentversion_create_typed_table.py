@@ -5,7 +5,7 @@ conn = get_connection();
 client = get_client();
 
 create_table_from_describe(
-    table_name="sf_content_versions__c",
+    table_name="sf_contentversion",
     sobject_type="ContentVersion",
     fields=["id", "Content_Type__c", "ContentDocumentId", "ContentSize", "CreatedById", "CreatedDate", "Department__c", "Disregard__c", "FileExtension", "FileType", "IsLatest", "LastModifiedById", "LastModifiedDate", "Origin", "OwnerId", "PublishStatus", "RecordType", "Name", "Title", "VersionNumber"],
     client=client,
