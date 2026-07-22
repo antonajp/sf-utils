@@ -1,0 +1,5 @@
+select id, ArchivedById, ArchivedDate,ContentAssetId, ContentModifiedDate, ContentSize, ContentSizeLong, CreatedById, CreatedDate,  FileExtension, FileType, LastModifiedById, LastModifiedDate, 
+LastReferencedDate, LastViewedDate, OwnerId, ParentId, PublishStatus, Title
+from ContentDocument
+where createddate >= 2023-06-01T00:00:00Z
+and createddate < 2026-12-31T00:00:00Z

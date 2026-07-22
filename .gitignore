@@ -47,10 +47,6 @@ docs/
 projects/*
 !projects/.gitkeep
 
-# User SOQL queries (local work, not committed)
-soql/*
-!soql/.gitkeep
-
 # Output files
 output/
 

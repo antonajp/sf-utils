@@ -1,0 +1,4 @@
+SELECT id, ParentId, BodyLength, ContentType, CreatedDate, Owner.Name, OwnerId, LastModifiedDate
+FROM Attachment 
+where createddate >= 2023-06-01T00:00:00Z
+and createddate < 2026-12-31T00:00:00Z
