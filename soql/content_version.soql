@@ -1,0 +1,6 @@
+select id, Content_Type__c, ContentDocumentId, ContentSize, CreatedById, CreatedDate, Department__c,
+Disregard__c, FileExtension, FileType, IsLatest, LastModifiedById, LastModifiedDate, Origin, OwnerId, PublishStatus,
+RecordType.Name, Title, VersionNumber
+from ContentVersion
+where createddate >= 2023-06-01T00:00:00Z
+and createddate < 2026-12-31T00:00:00Z
