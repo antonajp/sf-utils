@@ -134,25 +134,25 @@ class TestConstructInClause:
     """Tests for _construct_in_clause() SOQL generation."""
 
     def test_single_id(self):
-        """Single ID should be wrapped in parentheses with quotes."""
+        """Single ID should be quoted (parentheses come from template)."""
         ids = ["001000000000001AAA"]
         in_clause = _construct_in_clause(ids)
 
-        assert in_clause == "('001000000000001AAA')"
+        assert in_clause == "'001000000000001AAA'"
 
     def test_multiple_ids(self):
         """Multiple IDs should be comma-separated with quotes."""
         ids = ["001000000000001AAA", "001000000000002AAA", "001000000000003AAA"]
         in_clause = _construct_in_clause(ids)
 
-        assert in_clause == "('001000000000001AAA', '001000000000002AAA', '001000000000003AAA')"
+        assert in_clause == "'001000000000001AAA', '001000000000002AAA', '001000000000003AAA'"
 
     def test_preserves_id_order(self):
         """IDs should appear in same order as input."""
         ids = ["zzz", "aaa", "mmm"]
         in_clause = _construct_in_clause(ids)
 
-        assert in_clause == "('zzz', 'aaa', 'mmm')"
+        assert in_clause == "'zzz', 'aaa', 'mmm'"
 
 
 class TestSyncContentDocumentLinks:

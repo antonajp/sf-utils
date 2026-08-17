@@ -132,21 +132,22 @@ def _batch_ids(ids: List[str], batch_size: int) -> List[List[str]]:
 
 
 def _construct_in_clause(ids: List[str]) -> str:
-    """Construct properly quoted IN clause for SOQL.
+    """Construct properly quoted values for SOQL IN clause.
 
     Args:
         ids: List of Salesforce IDs (already validated).
 
     Returns:
-        IN clause string: ('id1', 'id2', 'id3', ...)
+        Comma-separated quoted IDs: 'id1', 'id2', 'id3'
+        (parentheses are in the SOQL template, not here)
 
     Example:
         >>> _construct_in_clause(["001000000000001AAA", "001000000000002AAA"])
-        "('001000000000001AAA', '001000000000002AAA')"
+        "'001000000000001AAA', '001000000000002AAA'"
     """
     # Quote each ID and join with commas
     quoted_ids = [f"'{id_value}'" for id_value in ids]
-    in_clause = f"({', '.join(quoted_ids)})"
+    in_clause = ", ".join(quoted_ids)
 
     # Log count only - never log actual ID values for security
     logger.debug("Constructed IN clause with %d IDs", len(ids))
