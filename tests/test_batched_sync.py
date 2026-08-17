@@ -171,11 +171,11 @@ class TestSyncContentDocumentLinks:
         mock_get_connection,
         mock_get_client,
     ):
-        """batch_size > 2000 should raise ValueError."""
-        with pytest.raises(ValueError, match="batch_size must be between 1 and 2000"):
+        """batch_size > 400 should raise ValueError (HTTP URL size limit)."""
+        with pytest.raises(ValueError, match="batch_size must be between 1 and 400"):
             sync_content_document_links(
                 source_table="sf_contentdocument",
-                batch_size=2001,
+                batch_size=401,
             )
 
     @patch("sf_utils.sync.batched_sync.get_client")
@@ -192,7 +192,7 @@ class TestSyncContentDocumentLinks:
         mock_get_client,
     ):
         """batch_size < 1 should raise ValueError."""
-        with pytest.raises(ValueError, match="batch_size must be between 1 and 2000"):
+        with pytest.raises(ValueError, match="batch_size must be between 1 and 400"):
             sync_content_document_links(
                 source_table="sf_contentdocument",
                 batch_size=0,
@@ -1011,7 +1011,7 @@ class TestEdgeCases:
     @patch("sf_utils.sync.batched_sync.query_all")
     @patch("sf_utils.sync.batched_sync.create_table_from_query")
     @patch("sf_utils.sync.batched_sync.upsert_records")
-    def test_batch_size_2000_max(
+    def test_batch_size_400_max(
         self,
         mock_upsert,
         mock_create_table,
@@ -1019,7 +1019,7 @@ class TestEdgeCases:
         mock_get_connection,
         mock_get_client,
     ):
-        """batch_size=2000 (Salesforce max) should be allowed."""
+        """batch_size=400 (HTTP URL size limit max) should be allowed."""
         mock_conn = Mock()
         mock_cursor = Mock()
         mock_cursor.fetchall.return_value = [("001000000000001AAA",)]
@@ -1035,7 +1035,7 @@ class TestEdgeCases:
 
         sync_content_document_links(
             source_table="sf_contentdocument",
-            batch_size=2000,
+            batch_size=400,
             db_conn=mock_conn,
             client=mock_client,
         )
