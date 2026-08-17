@@ -423,11 +423,18 @@ def sync_content_document_links(
         records_updated = 0
 
         if all_records:
-            # Normalize record keys using same sanitization as table creation
-            normalized_records = [
-                {_sanitize_column_name(k): v for k, v in record.items()}
-                for record in all_records
-            ]
+            # Normalize record keys and filter out nested objects (like 'attributes')
+            # Salesforce returns OrderedDict for nested objects which PostgreSQL can't handle
+            normalized_records = []
+            for record in all_records:
+                normalized = {}
+                for k, v in record.items():
+                    # Skip nested dicts/objects (e.g., 'attributes', related objects)
+                    if isinstance(v, dict):
+                        logger.debug("Skipping nested object field: %s", k)
+                        continue
+                    normalized[_sanitize_column_name(k)] = v
+                normalized_records.append(normalized)
 
             logger.info("Upserting %d records to %s", records_fetched, table_name)
 
