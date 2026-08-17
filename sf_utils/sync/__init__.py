@@ -42,7 +42,7 @@ def sync(
     *,
     mode: SyncMode = SyncMode.AUTO,
     threshold: int = 10000,
-    date_field: str = "LastModifiedDate",
+    date_field: Optional[str] = None,
     batch_size: int = 1000,
     poll_interval: float = 5.0,
     timeout: float = 900.0,
@@ -65,7 +65,8 @@ def sync(
             - SyncMode.BULK: Force Bulk API 2.0 (sync_records_bulk()).
         threshold: Record count threshold for AUTO mode. Defaults to 10000.
             If record count < threshold, uses REST. If >= threshold, uses BULK.
-        date_field: Date/datetime field for incremental sync. Defaults to 'LastModifiedDate'.
+        date_field: Date/datetime field for incremental sync. Defaults to None.
+            Set to None with mode='full' for objects without date fields.
         batch_size: Number of records to process per batch (BULK mode only). Defaults to 1000.
         poll_interval: Initial polling interval in seconds (BULK mode only). Defaults to 5.0.
         timeout: Maximum time to poll job in seconds (BULK mode only). Defaults to 900.0 (15 minutes).

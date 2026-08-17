@@ -6,7 +6,7 @@ Provides data structures and functions for loading YAML-based sync job configura
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 import yaml
 
@@ -97,7 +97,7 @@ class SyncJobConfig:
 
     object_name: str
     soql_file: str
-    date_field: str
+    date_field: Optional[str] = None
     chunk_size: str = "daily"
     mode: str = "auto"
     enabled: bool = True
@@ -111,8 +111,8 @@ class SyncJobConfig:
         if not self.soql_file or not isinstance(self.soql_file, str):
             raise ValueError("soql_file must be a non-empty string")
 
-        if not self.date_field or not isinstance(self.date_field, str):
-            raise ValueError("date_field must be a non-empty string")
+        if self.date_field is not None and (not self.date_field or not isinstance(self.date_field, str)):
+            raise ValueError("date_field must be a non-empty string or None")
 
         # Validate chunk_size
         valid_chunk_sizes = {"hourly", "daily", "weekly", "monthly", "none"}
@@ -335,7 +335,7 @@ def load_sync_config(
         )
 
         # Validate required fields
-        required_fields = {"object_name", "soql_file", "date_field"}
+        required_fields = {"object_name", "soql_file"}
         missing_fields = required_fields - sync_dict.keys()
 
         if missing_fields:
@@ -346,7 +346,7 @@ def load_sync_config(
             )
             raise ValueError(
                 f"Sync job at index {idx} missing required fields: {missing_fields}\n"
-                f"Required fields: object_name, soql_file, date_field\n"
+                f"Required fields: object_name, soql_file\n"
                 f"Got: {list(sync_dict.keys())}"
             )
 

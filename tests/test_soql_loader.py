@@ -764,3 +764,48 @@ class TestValidateSOQLEdgeCases:
 
         # Should extract the main SELECT clause (Id, CreatedDate, subquery)
         validate_soql(soql, "CreatedDate")
+
+
+class TestValidateSOQLDateFieldNone:
+    """Tests for validate_soql() when date_field=None."""
+
+    def test_validate_soql_skips_date_field_check_when_none(self):
+        """validate_soql() should skip date field validation when date_field=None."""
+        # Should not raise even though no date field in SELECT
+        validate_soql(
+            soql="SELECT Id, Name FROM Account",
+            date_field=None,
+        )
+        # Should pass silently
+
+    def test_validate_soql_still_checks_syntax_when_date_field_none(self):
+        """validate_soql() should still check SELECT/FROM when date_field=None."""
+        with pytest.raises(ValueError, match="SELECT"):
+            validate_soql(
+                soql="INVALID QUERY",
+                date_field=None,
+            )
+
+    def test_validate_soql_still_checks_dangerous_keywords_when_none(self):
+        """validate_soql() should still check dangerous keywords when date_field=None."""
+        with pytest.raises(ValueError, match="DROP"):
+            validate_soql(
+                soql="DROP TABLE Account",
+                date_field=None,
+            )
+
+    def test_validate_soql_checks_from_keyword_when_none(self):
+        """validate_soql() should still require FROM keyword when date_field=None."""
+        with pytest.raises(ValueError, match="FROM"):
+            validate_soql(
+                soql="SELECT Id, Name",
+                date_field=None,
+            )
+
+    def test_validate_soql_accepts_valid_query_without_date_field(self):
+        """validate_soql() should accept valid query without date field when date_field=None."""
+        # ContentDocumentLink has no date fields
+        soql = "SELECT Id, ContentDocumentId, LinkedEntityId FROM ContentDocumentLink"
+
+        # Should not raise
+        validate_soql(soql, date_field=None)

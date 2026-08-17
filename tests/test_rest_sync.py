@@ -647,8 +647,8 @@ class TestSyncResult:
 class TestSyncRecordsDateFieldValidation:
     """Tests for date_field parameter validation in sync_records()."""
 
-    def test_default_date_field_is_last_modified_date(self):
-        """Default date_field should be 'LastModifiedDate'."""
+    def test_default_date_field_is_none(self):
+        """Default date_field should be None (requires explicit specification or mode='full')."""
         SyncResult, sync_records = import_sync_records()
 
         with patch('sf_utils.sync.rest_sync.get_sync_state') as mock_get_state, \
@@ -664,14 +664,15 @@ class TestSyncRecordsDateFieldValidation:
             mock_get_conn.return_value = Mock()
             mock_query_all.return_value = []  # Empty list
 
-            # Call without date_field parameter
+            # Call without date_field parameter, must use mode='full'
             result = sync_records(
                 soql="SELECT Id, Name, LastModifiedDate FROM Account",
                 object_name="Account",
+                mode="full",
             )
 
-            # Should use default "LastModifiedDate"
-            assert result.date_field == "LastModifiedDate"
+            # Should default to None when not specified
+            assert result.date_field is None
 
     @patch('sf_utils.sync.rest_sync.get_sync_state')
     @patch('sf_utils.sync.rest_sync.get_client')
@@ -849,6 +850,7 @@ class TestSyncRecordsModeSelection:
         sync_records(
             soql="SELECT Id, Name, LastModifiedDate FROM Account",
             object_name="Account",
+            date_field="LastModifiedDate",  # Must specify for incremental mode
             mode="incremental",
         )
 
@@ -882,6 +884,7 @@ class TestSyncRecordsModeSelection:
         sync_records(
             soql="SELECT Id, Name, LastModifiedDate FROM Account",
             object_name="Account",
+            date_field="LastModifiedDate",  # Can specify for full mode but not required
             mode="full",
         )
 
@@ -929,6 +932,7 @@ class TestSyncRecordsWatermarkInjection:
         sync_records(
             soql="SELECT Id, Name, LastModifiedDate FROM Account",
             object_name="Account",
+            date_field="LastModifiedDate",  # Must specify for incremental mode
             mode="incremental",
         )
 
@@ -958,6 +962,7 @@ class TestSyncRecordsWatermarkInjection:
         sync_records(
             soql="SELECT Id, Name, LastModifiedDate FROM Account WHERE Type = 'Customer'",
             object_name="Account",
+            date_field="LastModifiedDate",  # Must specify for incremental mode
             mode="incremental",
         )
 
@@ -993,6 +998,7 @@ class TestSyncRecordsWatermarkInjection:
         sync_records(
             soql="SELECT Id, Name, LastModifiedDate FROM Account",
             object_name="Account",
+            date_field="LastModifiedDate",  # Must specify for incremental mode
             mode="incremental",
         )
 
@@ -1052,6 +1058,7 @@ class TestSyncRecordsIntegration:
         result = sync_records(
             soql="SELECT Id, Name, LastModifiedDate FROM Account",
             object_name="Account",
+            date_field="LastModifiedDate",  # Must specify for incremental mode
             mode="incremental",
         )
 
@@ -1127,3 +1134,171 @@ class TestSyncRecordsIntegration:
         assert isinstance(result.start_timestamp, datetime)
         assert isinstance(result.end_timestamp, datetime)
         assert result.end_timestamp >= result.start_timestamp
+
+
+class TestDateFieldNone:
+    """Tests for date_field=None functionality."""
+
+    @patch('sf_utils.sync.rest_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    def test_full_mode_with_date_field_none_works(
+        self, mock_upsert, mock_create_table, mock_query_all,
+        mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table
+    ):
+        """sync_records() should work with date_field=None and mode='full'."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = [{"Id": "001xxx", "LinkedEntityId": "002yyy"}]
+        mock_upsert.return_value = (1, 0)
+
+        result = sync_records(
+            soql="SELECT Id, LinkedEntityId FROM ContentDocumentLink",
+            object_name="ContentDocumentLink",
+            date_field=None,
+            mode="full",
+        )
+
+        assert result.date_field is None
+        assert result.object_name == "ContentDocumentLink"
+        assert result.records_fetched == 1
+        assert result.sync_mode == "full"
+
+    def test_incremental_mode_with_date_field_none_raises_error(self):
+        """sync_records() should raise ValueError when mode='incremental' and date_field=None."""
+        SyncResult, sync_records = import_sync_records()
+
+        with pytest.raises(ValueError, match="Incremental mode requires date_field"):
+            sync_records(
+                soql="SELECT Id FROM ContentDocumentLink",
+                object_name="ContentDocumentLink",
+                date_field=None,
+                mode="incremental",
+            )
+
+    @patch('sf_utils.sync.rest_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    def test_watermark_skipped_when_date_field_none(
+        self, mock_upsert, mock_create_table, mock_query_all,
+        mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table
+    ):
+        """Watermark injection should be skipped when date_field=None."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = [{"Id": "001xxx"}]
+        mock_upsert.return_value = (1, 0)
+
+        original_soql = "SELECT Id FROM ContentDocumentLink"
+        sync_records(
+            soql=original_soql,
+            object_name="ContentDocumentLink",
+            date_field=None,
+            mode="full",
+        )
+
+        # Verify query_all received original SOQL (no watermark injection)
+        assert mock_query_all.called
+        call_kwargs = mock_query_all.call_args[1]
+        assert call_kwargs['soql'] == original_soql
+
+    @patch('sf_utils.sync.rest_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    def test_validation_skipped_when_date_field_none(
+        self, mock_upsert, mock_create_table, mock_query_all,
+        mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table
+    ):
+        """validate_soql() date field check should be skipped when date_field=None."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+        mock_upsert.return_value = (0, 0)
+
+        # Should not raise even though no date field in SELECT
+        result = sync_records(
+            soql="SELECT Id FROM ContentDocumentLink",
+            object_name="ContentDocumentLink",
+            date_field=None,
+            mode="full",
+            validate_date_field=True,  # Validation enabled but should skip date field check
+        )
+
+        assert result.date_field is None
+
+    @patch('sf_utils.sync.rest_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.rest_sync.get_sync_state')
+    @patch('sf_utils.sync.rest_sync.update_sync_state')
+    @patch('sf_utils.sync.rest_sync.get_client')
+    @patch('sf_utils.sync.rest_sync.get_connection')
+    @patch('sf_utils.sync.rest_sync.query_all')
+    @patch('sf_utils.sync.rest_sync.create_table_from_query')
+    @patch('sf_utils.sync.rest_sync.upsert_records')
+    def test_warning_logged_when_date_field_none(
+        self, mock_upsert, mock_create_table, mock_query_all,
+        mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table, caplog
+    ):
+        """Should log WARNING when syncing without date_field."""
+        SyncResult, sync_records = import_sync_records()
+
+        mock_get_state.return_value = None
+        mock_get_client.return_value = Mock()
+        mock_get_conn.return_value = Mock()
+        mock_query_all.return_value = []
+        mock_upsert.return_value = (0, 0)
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            sync_records(
+                soql="SELECT Id FROM ContentDocumentLink",
+                object_name="ContentDocumentLink",
+                date_field=None,
+                mode="full",
+            )
+
+        # Should log warning about no incremental sync tracking
+        assert any("Syncing without date field" in record.message for record in caplog.records)
+
+    def test_sync_result_date_field_can_be_none(self):
+        """SyncResult should accept date_field=None."""
+        SyncResult, _ = import_sync_records()
+
+        result = SyncResult(
+            object_name="ContentDocumentLink",
+            records_fetched=100,
+            records_inserted=100,
+            records_updated=0,
+            sync_mode="full",
+            start_timestamp=datetime.now(timezone.utc),
+            end_timestamp=datetime.now(timezone.utc),
+            date_field=None,
+        )
+        assert result.date_field is None
