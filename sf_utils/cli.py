@@ -537,5 +537,133 @@ from sf_utils.cli_status import register_status_command
 register_status_command(cli)
 
 
+@cli.group("link")
+def link_group() -> None:
+    """Sync Salesforce junction objects using batched ID queries.
+
+    Junction objects like ContentDocumentLink have platform restrictions that
+    require filtering by specific IDs. These commands read IDs from a local
+    PostgreSQL table and query Salesforce in batches.
+    """
+    pass
+
+
+@link_group.command("contentdocument")
+@click.option(
+    "--source-table",
+    default="sf_contentdocument",
+    help="PostgreSQL table to read ContentDocumentIds from. Defaults to sf_contentdocument.",
+)
+@click.option(
+    "--id-column",
+    default="id",
+    help="Column containing ContentDocumentIds. Defaults to 'id'.",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=200,
+    help="Number of IDs per SOQL batch. Defaults to 200. Max 2000.",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable debug logging for detailed output",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Preview sync without executing (no changes will be made)",
+)
+def link_contentdocument_cmd(
+    source_table: str,
+    id_column: str,
+    batch_size: int,
+    verbose: bool,
+    dry_run: bool,
+) -> None:
+    """Sync ContentDocumentLink records using batched ContentDocumentId queries.
+
+    ContentDocumentLink requires filtering by ContentDocumentId or LinkedEntityId
+    (Salesforce platform restriction). This command reads ContentDocumentIds from
+    a local PostgreSQL table, batches them, and queries Salesforce in batches.
+
+    Prerequisites:
+        - ContentDocument must be synced first (sf-sync sync ContentDocument)
+        - sf_contentdocument table must exist in PostgreSQL
+
+    Examples:
+
+        # Sync using default settings
+        sf-sync link contentdocument
+
+        # Specify custom source table
+        sf-sync link contentdocument --source-table my_content_docs
+
+        # Use smaller batches
+        sf-sync link contentdocument --batch-size 100
+
+        # Preview without syncing
+        sf-sync link contentdocument --dry-run
+
+    Exit codes:
+        0 - Success
+        1 - Failure (database error, API error, invalid IDs)
+    """
+    from sf_utils.sync import sync_content_document_links
+
+    _configure_logging(verbose)
+
+    logger.debug(
+        "link contentdocument invoked: source_table=%s id_column=%s batch_size=%d dry_run=%s",
+        source_table,
+        id_column,
+        batch_size,
+        dry_run,
+    )
+
+    if dry_run:
+        click.echo("DRY RUN - Preview only (no changes will be made)")
+        click.echo(f"Source table: {source_table}")
+        click.echo(f"ID column: {id_column}")
+        click.echo(f"Batch size: {batch_size}")
+        click.echo()
+        click.echo("Run without --dry-run to execute sync")
+        sys.exit(0)
+
+    try:
+        logger.info("Starting ContentDocumentLink sync from %s.%s", source_table, id_column)
+        start_time = time.time()
+
+        result = sync_content_document_links(
+            source_table=source_table,
+            id_column=id_column,
+            batch_size=batch_size,
+        )
+
+        duration = time.time() - start_time
+
+        click.echo("\nSync Summary")
+        click.echo("============")
+        click.echo(f"Object: ContentDocumentLink")
+        click.echo(f"Records: {result.records_fetched:,}")
+        click.echo(f"Inserted: {result.records_inserted:,}")
+        click.echo(f"Updated: {result.records_updated:,}")
+        click.echo(f"Duration: {duration:.1f}s")
+        click.echo("Status: SUCCESS")
+
+        sys.exit(0)
+
+    except ValueError as e:
+        logger.error("Validation error: %s", e)
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+    except Exception as e:
+        logger.exception("Sync failed: %s", e)
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()

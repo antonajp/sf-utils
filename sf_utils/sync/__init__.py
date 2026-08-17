@@ -1,4 +1,11 @@
-"""Sync utilities for Salesforce data synchronization."""
+"""Sync utilities for Salesforce data synchronization.
+
+This module provides multiple sync strategies:
+- sync_records(): REST API sync for standard objects
+- sync_records_bulk(): Bulk API 2.0 sync for large datasets
+- sync(): Auto-selects REST or Bulk based on record count
+- sync_content_document_links(): Batched sync for junction objects with platform restrictions
+"""
 
 import logging
 from enum import Enum
@@ -9,6 +16,7 @@ from simple_salesforce import Salesforce
 
 from sf_utils.client import get_client
 from sf_utils.query import query
+from sf_utils.sync.batched_sync import sync_content_document_links
 from sf_utils.sync.bulk_sync import create_bulk_query_job, poll_bulk_job, get_bulk_results, sync_records_bulk
 from sf_utils.sync.rest_sync import ChunkInterval, query_chunked, sync_records, SyncResult
 from sf_utils.sync.soql_loader import load_soql, render_soql, validate_soql
@@ -202,6 +210,7 @@ def sync(
 
 
 __all__ = [
+    "sync_content_document_links",
     "create_bulk_query_job",
     "poll_bulk_job",
     "get_bulk_results",
