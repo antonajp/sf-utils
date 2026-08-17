@@ -150,20 +150,20 @@ DANGEROUS_KEYWORDS = re.compile(
 
 def validate_soql(
     soql: str,
-    date_field: str,
+    date_field: Optional[str] = None,
     file_path: Optional[str] = None
 ) -> None:
     """Validate SOQL query for syntax and security issues.
 
     Performs static validation checks:
     - Ensures query contains SELECT and FROM keywords
-    - Verifies date field exists in SELECT clause
+    - Verifies date field exists in SELECT clause (if date_field provided)
     - Checks for dangerous SQL keywords (DROP, DELETE, etc.)
     - Optionally warns if file has world-writable permissions
 
     Args:
         soql: SOQL query string to validate.
-        date_field: Date field name that must exist in SELECT clause.
+        date_field: Date field name that must exist in SELECT clause. Optional.
         file_path: Optional file path for permission check.
 
     Raises:
@@ -175,6 +175,9 @@ def validate_soql(
         >>>
         >>> validate_soql("SELECT Id FROM Account", "CreatedDate")
         ... # Raises: ValueError: Date field 'CreatedDate' not found in SELECT clause
+        >>>
+        >>> validate_soql("SELECT Id FROM Account", None)
+        >>> # Passes silently (no date field check)
     """
     logger.debug("Validating SOQL query (date_field: %s)", date_field)
 
@@ -197,35 +200,39 @@ def validate_soql(
         logger.error("SOQL query missing FROM keyword")
         raise ValueError("SOQL query must contain FROM keyword")
 
-    # Extract SELECT clause to check for date field
-    # Match from SELECT to FROM (non-greedy, case-insensitive)
-    select_match = re.search(
-        r'\bSELECT\s+(.*?)\s+FROM\b',
-        soql,
-        re.IGNORECASE | re.DOTALL
-    )
-
-    if not select_match:
-        logger.error("Could not parse SELECT clause from SOQL query")
-        raise ValueError("Could not parse SELECT clause from SOQL query")
-
-    select_clause = select_match.group(1)
-    logger.debug("Parsed SELECT clause: %s", select_clause.replace('\n', ' '))
-
-    # Check if date field is in the SELECT clause
-    # Use word boundary to match exact field names (case-insensitive)
-    date_field_pattern = re.compile(
-        r'\b' + re.escape(date_field) + r'\b',
-        re.IGNORECASE
-    )
-
-    if not date_field_pattern.search(select_clause):
-        logger.error("Date field '%s' not found in SELECT clause", date_field)
-        raise ValueError(
-            f"Date field '{date_field}' not found in SELECT clause"
+    # Skip date field validation if date_field is None
+    if date_field is None:
+        logger.debug("Skipping date field validation (date_field=None)")
+    else:
+        # Extract SELECT clause to check for date field
+        # Match from SELECT to FROM (non-greedy, case-insensitive)
+        select_match = re.search(
+            r'\bSELECT\s+(.*?)\s+FROM\b',
+            soql,
+            re.IGNORECASE | re.DOTALL
         )
 
-    logger.debug("Date field '%s' found in SELECT clause", date_field)
+        if not select_match:
+            logger.error("Could not parse SELECT clause from SOQL query")
+            raise ValueError("Could not parse SELECT clause from SOQL query")
+
+        select_clause = select_match.group(1)
+        logger.debug("Parsed SELECT clause: %s", select_clause.replace('\n', ' '))
+
+        # Check if date field is in the SELECT clause
+        # Use word boundary to match exact field names (case-insensitive)
+        date_field_pattern = re.compile(
+            r'\b' + re.escape(date_field) + r'\b',
+            re.IGNORECASE
+        )
+
+        if not date_field_pattern.search(select_clause):
+            logger.error("Date field '%s' not found in SELECT clause", date_field)
+            raise ValueError(
+                f"Date field '{date_field}' not found in SELECT clause"
+            )
+
+        logger.debug("Date field '%s' found in SELECT clause", date_field)
 
     # Check file permissions if file_path provided
     if file_path:

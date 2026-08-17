@@ -49,7 +49,8 @@ class SyncResult:
         sync_mode: Sync mode used ('incremental' or 'full').
         start_timestamp: Timestamp when sync started (timezone-aware UTC).
         end_timestamp: Timestamp when sync completed (timezone-aware UTC).
-        date_field: Date field used for incremental sync tracking.
+        date_field: Date field used for incremental sync tracking. None if no date
+            field was specified (full sync mode for objects without timestamp fields).
     """
 
     object_name: str
@@ -59,7 +60,7 @@ class SyncResult:
     sync_mode: str
     start_timestamp: datetime
     end_timestamp: datetime
-    date_field: str
+    date_field: Optional[str]
 
 
 def _generate_date_chunks(
@@ -362,7 +363,7 @@ def sync_records(
     soql: str,
     object_name: str,
     *,
-    date_field: str = "LastModifiedDate",
+    date_field: Optional[str] = None,
     validate_date_field: bool = True,
     chunk_size: ChunkInterval = ChunkInterval.DAILY,
     mode: str = "incremental",
@@ -385,7 +386,8 @@ def sync_records(
     Args:
         soql: SOQL query string. Must include Id field and the date_field in SELECT.
         object_name: Salesforce object name for sync state tracking (e.g., 'Account').
-        date_field: Date/datetime field for incremental sync. Defaults to 'LastModifiedDate'.
+        date_field: Date/datetime field for incremental sync. Defaults to None.
+            Required for mode='incremental'. Set to None with mode='full' for objects without date fields.
         validate_date_field: If True, validate date_field exists in SELECT clause. Default True.
         chunk_size: Time interval for date chunking (incremental mode only). Default DAILY.
         mode: Sync mode - 'incremental' or 'full'. Default 'incremental'.
@@ -450,11 +452,23 @@ def sync_records(
     if mode not in ("incremental", "full"):
         raise ValueError(f"Invalid mode '{mode}'. Must be 'incremental' or 'full'")
 
+    # Validate mode and date_field compatibility
+    if mode == "incremental" and date_field is None:
+        raise ValueError("Incremental mode requires date_field to be specified. Use mode='full' for objects without date fields.")
+
+    # Log warning if date_field is None
+    if date_field is None:
+        logger.warning(
+            "Syncing without date field - no incremental sync tracking. "
+            "Full table sync only. Consider API quota implications."
+        )
+
     # Validate date field name format
-    _validate_date_field_name(date_field)
+    if date_field is not None:
+        _validate_date_field_name(date_field)
 
     # Validate date field exists in SELECT clause
-    if validate_date_field:
+    if validate_date_field and date_field is not None:
         logger.info("Using date field '%s' for incremental sync", date_field)
         validate_soql(soql=soql, date_field=date_field)
         logger.debug("Date field validation passed")

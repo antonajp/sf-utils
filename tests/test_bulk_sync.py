@@ -1382,8 +1382,9 @@ class TestSyncRecordsBulkSuccess:
         from sf_utils.sync.bulk_sync import sync_records_bulk
 
         result = sync_records_bulk(
-            soql="SELECT Id, Name FROM Account",
-            object_name="Account"
+            soql="SELECT Id, Name, LastModifiedDate FROM Account",
+            object_name="Account",
+            date_field="LastModifiedDate",  # Must specify explicitly
         )
 
         # Verify result
@@ -1546,8 +1547,9 @@ class TestSyncRecordsBulkWatermark:
         from sf_utils.sync.bulk_sync import sync_records_bulk
 
         sync_records_bulk(
-            soql="SELECT Id, Name FROM Account WHERE Industry = 'Technology'",
-            object_name="Account"
+            soql="SELECT Id, Name, LastModifiedDate FROM Account WHERE Industry = 'Technology'",
+            object_name="Account",
+            date_field="LastModifiedDate",  # Must specify for watermark injection
         )
 
         # Verify create_bulk_query_job was called with modified SOQL
@@ -2333,3 +2335,124 @@ class TestGetBulkResultsPagination:
         assert "John Doe" not in caplog.text
         assert "john@example.com" not in caplog.text
         assert "Jane Smith" not in caplog.text
+
+
+class TestDateFieldNoneBulk:
+    """Tests for date_field=None functionality in Bulk API sync."""
+
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    def test_full_mode_with_date_field_none_works_bulk(
+        self, mock_upsert, mock_create_table, mock_get_results, mock_poll,
+        mock_create_job, mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table
+    ):
+        """sync_records_bulk() should work with date_field=None."""
+        from sf_utils.sync.bulk_sync import sync_records_bulk, SyncResult
+
+        mock_get_state.return_value = None
+        mock_client = Mock()
+        mock_client.sf_instance = "example.my.salesforce.com"
+        mock_get_client.return_value = mock_client
+        mock_get_conn.return_value = Mock()
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"state": "JobComplete", "numberRecordsProcessed": 1}
+        mock_get_results.return_value = iter([[{"Id": "001xxx", "LinkedEntityId": "002yyy"}]])
+        mock_upsert.return_value = (1, 0)
+
+        result = sync_records_bulk(
+            soql="SELECT Id, LinkedEntityId FROM ContentDocumentLink",
+            object_name="ContentDocumentLink",
+            date_field=None,
+        )
+
+        assert result.date_field is None
+        assert result.object_name == "ContentDocumentLink"
+        assert result.records_fetched == 1
+        assert result.sync_mode == "incremental"  # Bulk sync always uses incremental mode
+
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    def test_incremental_watermark_skipped_bulk(
+        self, mock_upsert, mock_create_table, mock_get_results, mock_poll,
+        mock_create_job, mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table
+    ):
+        """Watermark injection should be skipped in bulk sync when date_field=None."""
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        mock_get_state.return_value = None
+        mock_client = Mock()
+        mock_client.sf_instance = "example.my.salesforce.com"
+        mock_get_client.return_value = mock_client
+        mock_get_conn.return_value = Mock()
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"state": "JobComplete", "numberRecordsProcessed": 1}
+        mock_get_results.return_value = iter([[{"Id": "001xxx"}]])
+        mock_upsert.return_value = (1, 0)
+
+        original_soql = "SELECT Id FROM ContentDocumentLink"
+        sync_records_bulk(
+            soql=original_soql,
+            object_name="ContentDocumentLink",
+            date_field=None,
+        )
+
+        # Verify create_bulk_query_job received original SOQL (no watermark injection)
+        assert mock_create_job.called
+        call_kwargs = mock_create_job.call_args[1]
+        assert call_kwargs['soql_query'] == original_soql
+
+    @patch('sf_utils.sync.bulk_sync.ensure_sync_state_table')
+    @patch('sf_utils.sync.bulk_sync.get_sync_state')
+    @patch('sf_utils.sync.bulk_sync.update_sync_state')
+    @patch('sf_utils.sync.bulk_sync.get_client')
+    @patch('sf_utils.sync.bulk_sync.get_connection')
+    @patch('sf_utils.sync.bulk_sync.create_bulk_query_job')
+    @patch('sf_utils.sync.bulk_sync.poll_bulk_job')
+    @patch('sf_utils.sync.bulk_sync.get_bulk_results')
+    @patch('sf_utils.sync.bulk_sync.create_table_from_query')
+    @patch('sf_utils.sync.bulk_sync.upsert_records')
+    def test_warning_logged_bulk(
+        self, mock_upsert, mock_create_table, mock_get_results, mock_poll,
+        mock_create_job, mock_get_conn, mock_get_client, mock_update_state,
+        mock_get_state, mock_ensure_table, caplog
+    ):
+        """Should log WARNING when syncing without date_field in bulk mode."""
+        from sf_utils.sync.bulk_sync import sync_records_bulk
+
+        mock_get_state.return_value = None
+        mock_client = Mock()
+        mock_client.sf_instance = "example.my.salesforce.com"
+        mock_get_client.return_value = mock_client
+        mock_get_conn.return_value = Mock()
+        mock_create_job.return_value = "750xx0000004567AAA"
+        mock_poll.return_value = {"state": "JobComplete", "numberRecordsProcessed": 0}
+        mock_get_results.return_value = iter([[]])
+        mock_upsert.return_value = (0, 0)
+
+        with caplog.at_level(logging.WARNING):
+            sync_records_bulk(
+                soql="SELECT Id FROM ContentDocumentLink",
+                object_name="ContentDocumentLink",
+                date_field=None,
+            )
+
+        # Should log warning about no incremental sync tracking
+        assert any("Syncing without date field" in record.message for record in caplog.records)

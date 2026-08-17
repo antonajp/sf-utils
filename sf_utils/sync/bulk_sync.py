@@ -880,7 +880,7 @@ def sync_records_bulk(
     soql: str,
     object_name: str,
     *,
-    date_field: str = "LastModifiedDate",
+    date_field: Optional[str] = None,
     batch_size: int = 1000,
     poll_interval: float = 5.0,
     timeout: float = 900.0,
@@ -904,7 +904,8 @@ def sync_records_bulk(
     Args:
         soql: SOQL query string. Must include Id field and the date_field in SELECT.
         object_name: Salesforce object name for sync state tracking (e.g., 'Account').
-        date_field: Date/datetime field for incremental sync. Defaults to 'LastModifiedDate'.
+        date_field: Date/datetime field for incremental sync. Defaults to None.
+            Set to None with mode='full' for objects without date fields.
         batch_size: Number of records to process per batch. Defaults to 1000.
         poll_interval: Initial polling interval in seconds. Defaults to 5.0.
         timeout: Maximum time to poll job in seconds. Defaults to 900.0 (15 minutes).
@@ -975,6 +976,13 @@ def sync_records_bulk(
     if timeout <= 0:
         raise ValueError("timeout must be positive")
 
+    # Log warning if date_field is None
+    if date_field is None:
+        logger.warning(
+            "Syncing without date field - no incremental sync tracking. "
+            "Full table sync only. Consider API quota implications."
+        )
+
     # Initialize client if not provided
     if client is None:
         logger.debug("Creating Salesforce client from environment")
@@ -999,21 +1007,25 @@ def sync_records_bulk(
         sync_state = get_sync_state(object_name=object_name, db_conn=db_conn)
         modified_soql = soql
 
-        if sync_state:
-            watermark = sync_state.last_sync_timestamp
-            logger.info(
-                "Retrieved watermark for %s: %s",
-                object_name,
-                watermark.isoformat(),
-            )
+        # Skip watermark injection if date_field is None
+        if date_field is not None:
+            if sync_state:
+                watermark = sync_state.last_sync_timestamp
+                logger.info(
+                    "Retrieved watermark for %s: %s",
+                    object_name,
+                    watermark.isoformat(),
+                )
 
-            # Inject watermark filter into SOQL
-            modified_soql = _inject_incremental_filter(soql, date_field, watermark)
+                # Inject watermark filter into SOQL
+                modified_soql = _inject_incremental_filter(soql, date_field, watermark)
+            else:
+                logger.info(
+                    "No previous sync state for %s - performing initial full sync",
+                    object_name,
+                )
         else:
-            logger.info(
-                "No previous sync state for %s - performing initial full sync",
-                object_name,
-            )
+            logger.debug("Skipping watermark injection (date_field=None)")
 
         # Create Bulk API 2.0 query job
         logger.info("Creating Bulk API 2.0 job for %s", object_name)

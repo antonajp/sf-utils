@@ -141,6 +141,24 @@ class TestSyncJobConfig:
 
         assert "date_field" in str(exc_info.value)
 
+    def test_date_field_none_allowed(self):
+        """Should accept date_field=None for objects without date tracking."""
+        config = SyncJobConfig(
+            object_name="ContentDocumentLink",
+            soql_file="soql/content_document_link.soql",
+            date_field=None,
+        )
+        assert config.date_field is None
+        assert config.object_name == "ContentDocumentLink"
+
+    def test_date_field_omitted_defaults_to_none(self):
+        """Should default date_field to None when omitted."""
+        config = SyncJobConfig(
+            object_name="ContentDocumentLink",
+            soql_file="soql/content_document_link.soql",
+        )
+        assert config.date_field is None
+
     def test_validates_enabled_is_boolean(self):
         """Should raise ValueError for non-boolean enabled value."""
         with pytest.raises(ValueError) as exc_info:
@@ -354,19 +372,39 @@ syncs:
 
         assert "soql_file" in str(exc_info.value).lower()
 
-    def test_missing_date_field_raises_valueerror(self):
-        """Should raise ValueError when date_field is missing."""
+    def test_date_field_omitted_in_yaml_loads_as_none(self):
+        """Should load config with omitted date_field as None."""
         yaml_content = """
 syncs:
-  - object_name: Account
-    soql_file: soql/account.soql
+  - object_name: ContentDocumentLink
+    soql_file: soql/content_document_link.soql
+    mode: bulk
+    enabled: true
 """
 
         with mock_config_file(yaml_content):
-            with pytest.raises(ValueError) as exc_info:
-                load_sync_config("test.yaml")
+            result = load_sync_config("test.yaml")
 
-        assert "date_field" in str(exc_info.value).lower()
+        assert len(result) == 1
+        assert result[0].date_field is None
+        assert result[0].object_name == "ContentDocumentLink"
+
+    def test_date_field_null_in_yaml_loads_as_none(self):
+        """Should load config with null date_field as None."""
+        yaml_content = """
+syncs:
+  - object_name: ContentDocumentLink
+    soql_file: soql/content_document_link.soql
+    date_field: null
+    mode: bulk
+"""
+
+        with mock_config_file(yaml_content):
+            result = load_sync_config("test.yaml")
+
+        assert len(result) == 1
+        assert result[0].date_field is None
+        assert result[0].object_name == "ContentDocumentLink"
 
     def test_empty_syncs_list_returns_empty_list(self):
         """Should return empty list when syncs list is empty."""
