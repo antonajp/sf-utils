@@ -563,7 +563,7 @@ def link_group() -> None:
     "--batch-size",
     type=int,
     default=200,
-    help="Number of IDs per SOQL batch. Defaults to 200. Max 2000.",
+    help="Number of IDs per SOQL batch. Defaults to 200. Max 400.",
 )
 @click.option(
     "--verbose",

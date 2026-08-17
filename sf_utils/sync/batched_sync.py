@@ -132,21 +132,22 @@ def _batch_ids(ids: List[str], batch_size: int) -> List[List[str]]:
 
 
 def _construct_in_clause(ids: List[str]) -> str:
-    """Construct properly quoted IN clause for SOQL.
+    """Construct properly quoted values for SOQL IN clause.
 
     Args:
         ids: List of Salesforce IDs (already validated).
 
     Returns:
-        IN clause string: ('id1', 'id2', 'id3', ...)
+        Comma-separated quoted IDs: 'id1', 'id2', 'id3'
+        (parentheses are in the SOQL template, not here)
 
     Example:
         >>> _construct_in_clause(["001000000000001AAA", "001000000000002AAA"])
-        "('001000000000001AAA', '001000000000002AAA')"
+        "'001000000000001AAA', '001000000000002AAA'"
     """
     # Quote each ID and join with commas
     quoted_ids = [f"'{id_value}'" for id_value in ids]
-    in_clause = f"({', '.join(quoted_ids)})"
+    in_clause = ", ".join(quoted_ids)
 
     # Log count only - never log actual ID values for security
     logger.debug("Constructed IN clause with %d IDs", len(ids))
@@ -174,7 +175,7 @@ def sync_content_document_links(
     Workflow:
     1. Query PostgreSQL for distinct ContentDocumentIds from source_table
     2. Validate IDs (Salesforce format: 15/18 alphanumeric chars)
-    3. Batch IDs into groups of batch_size (default 200, max 2000)
+    3. Batch IDs into groups of batch_size (default 200, max 400)
     4. Execute SOQL queries for each batch
     5. Create sf_contentdocumentlink table
     6. Upsert records to PostgreSQL
@@ -184,7 +185,7 @@ def sync_content_document_links(
             Must contain an ID column (default: 'id').
         id_column: Column name containing ContentDocumentIds. Defaults to 'id'.
         batch_size: Number of IDs per SOQL batch. Defaults to 200.
-            Maximum is 2000 (Salesforce SOQL IN clause limit).
+            Maximum is 400 (HTTP URL size limit - larger batches cause 431 errors).
         soql_template: Custom SOQL template. Must contain {id_list} placeholder.
             Defaults to selecting Id, ShareType, Visibility, ContentDocumentId, LinkedEntityId.
         retry_config: Retry configuration. Defaults to DEFAULT_RETRY_CONFIG.
@@ -234,9 +235,13 @@ def sync_content_document_links(
     start_time = datetime.now(timezone.utc)
 
     # Validate batch_size
-    if batch_size < 1 or batch_size > 2000:
+    # Note: Salesforce SOQL IN clause allows 2000 values, but the REST API sends
+    # SOQL as a URL parameter. With 18-char IDs + quotes, 400 IDs ≈ 9KB which is
+    # safe for HTTP headers. 800+ IDs causes HTTP 431 "Request Header Too Large".
+    max_batch_size = 400
+    if batch_size < 1 or batch_size > max_batch_size:
         raise ValueError(
-            f"batch_size must be between 1 and 2000 (Salesforce SOQL limit), got {batch_size}"
+            f"batch_size must be between 1 and {max_batch_size} (HTTP URL size limit), got {batch_size}"
         )
 
     # Use default SOQL template if not provided
