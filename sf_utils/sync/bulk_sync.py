@@ -143,6 +143,10 @@ def create_bulk_query_job(
         status_code = response.status_code
         try:
             response_body = response.json()
+            # Salesforce sometimes returns errors as a list: [{"errorCode": "...", "message": "..."}]
+            # Normalize to dict for consistent handling
+            if isinstance(response_body, list) and response_body:
+                response_body = response_body[0]
         except Exception:
             # If JSON parsing fails, use text as fallback
             response_body = {"error": response.text}
@@ -384,6 +388,10 @@ def poll_bulk_job(
         status_code = response.status_code
         try:
             job_info = response.json()
+            # Salesforce sometimes returns errors as a list: [{"errorCode": "...", "message": "..."}]
+            # Normalize to dict for consistent handling
+            if isinstance(job_info, list) and job_info:
+                job_info = job_info[0]
         except Exception:
             # If JSON parsing fails, use text as fallback
             job_info = {"error": response.text}
@@ -666,6 +674,10 @@ def get_bulk_results(
             # Try to parse error response (may be JSON or text)
             try:
                 error_body = response.json()
+                # Salesforce sometimes returns errors as a list: [{"errorCode": "...", "message": "..."}]
+                # Normalize to dict for consistent handling
+                if isinstance(error_body, list) and error_body:
+                    error_body = error_body[0]
                 error_message = error_body.get('message', error_body.get('exceptionMessage', 'Unknown error'))
             except Exception:
                 error_body = {"error": response.text}

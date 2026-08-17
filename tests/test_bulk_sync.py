@@ -280,6 +280,30 @@ class TestCreateBulkQueryJobErrorHandling:
                 retry_config=NO_RETRY_CONFIG
             )
 
+    @patch('sf_utils.sync.bulk_sync.requests.post')
+    def test_list_error_response_handled(self, mock_post, mock_client):
+        """Salesforce error returned as list should be handled correctly."""
+        # Salesforce sometimes returns errors as: [{"errorCode": "...", "message": "..."}]
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = [
+            {
+                "errorCode": "MALFORMED_QUERY",
+                "message": "Invalid SOQL: unexpected token"
+            }
+        ]
+        mock_post.return_value = mock_response
+
+        with pytest.raises(SalesforceAPIError) as exc_info:
+            create_bulk_query_job(
+                sobject_type="ContentDocumentLink",
+                soql_query="SELECT Id FROM ContentDocumentLink",
+                client=mock_client
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "Invalid SOQL" in str(exc_info.value) or "MALFORMED_QUERY" in str(exc_info.value)
+
 
 class TestCreateBulkQueryJobClientHandling:
     """Tests for client creation and handling."""
