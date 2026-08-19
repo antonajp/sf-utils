@@ -15,6 +15,7 @@ import click
 
 from sf_utils.client import get_client
 from sf_utils.db import get_connection
+from sf_utils.migration import run_migration
 from sf_utils.sync import SyncMode, sync
 from sf_utils.sync.config import SyncJobConfig, load_sync_config
 from sf_utils.sync.rest_sync import SyncResult
@@ -662,6 +663,149 @@ def link_contentdocument_cmd(
     except Exception as e:
         logger.exception("Sync failed: %s", e)
         click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command("migrate-attachments")
+@click.option(
+    "--start-date",
+    default="2023-06-01",
+    help="Start date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH). Defaults to 2023-06-01.",
+)
+@click.option(
+    "--config",
+    type=click.Path(path_type=Path),
+    default="migration.properties",
+    help="Path to properties configuration file. Defaults to migration.properties.",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Resume from last saved cursor position",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable debug logging for detailed output",
+)
+def migrate_attachments_cmd(
+    start_date: str,
+    config: Path,
+    resume: bool,
+    verbose: bool,
+) -> None:
+    """Migrate Salesforce Attachments to ContentDocuments (Files).
+
+    Processes attachments hour-by-hour from Progress_Note__c records,
+    executing tiered batch jobs based on attachment body size. Supports
+    resumption from cursor file on failure.
+
+    \b
+    Examples:
+        # Run from default start date (2023-06-01)
+        sf-sync migrate-attachments
+
+        # Run from specific start date
+        sf-sync migrate-attachments --start-date 2024-01-15
+
+        # Resume from specific hour (for recovery)
+        sf-sync migrate-attachments --start-date 2024-03-10T14
+
+        # Custom config file
+        sf-sync migrate-attachments --config ./my-config.properties
+
+        # Resume from last cursor position
+        sf-sync migrate-attachments --resume
+
+        # Verbose mode
+        sf-sync migrate-attachments --verbose
+
+    Exit codes:
+        0 - Success
+        1 - Failure (with recovery command displayed)
+    """
+    _configure_logging(verbose)
+
+    logger.debug(
+        "migrate-attachments invoked: start_date=%s config=%s resume=%s verbose=%s",
+        start_date,
+        config,
+        resume,
+        verbose,
+    )
+
+    # Parse start date (handle both date and datetime formats)
+    try:
+        if "T" in start_date:
+            # Datetime with hour: 2024-03-10T14
+            parsed_start = datetime.strptime(start_date, "%Y-%m-%dT%H")
+        else:
+            # Date only: 2024-03-10
+            parsed_start = datetime.strptime(start_date, "%Y-%m-%d")
+
+        # Make timezone-aware (UTC)
+        parsed_start = parsed_start.replace(tzinfo=timezone.utc)
+        logger.debug("Parsed start date: %s", parsed_start.isoformat())
+
+    except ValueError as e:
+        logger.error("Invalid start date format: %s", start_date)
+        click.echo(
+            f"ERROR: Invalid start date format: {start_date}\n"
+            f"Expected format: YYYY-MM-DD or YYYY-MM-DDTHH (e.g., 2024-03-10 or 2024-03-10T14)",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Validate config file exists
+    if not config.exists():
+        logger.error("Config file not found: %s", config)
+        click.echo(f"ERROR: Config file not found: {config}", err=True)
+        sys.exit(1)
+
+    try:
+        click.echo(
+            f"Starting attachment migration from {parsed_start.strftime('%Y-%m-%d %H:%M')} UTC"
+        )
+        click.echo(f"Config: {config}")
+        if resume:
+            click.echo("Resume mode: ON")
+        click.echo()
+
+        start_time = time.time()
+
+        # Run the migration
+        result = run_migration(
+            start_date=parsed_start,
+            config_path=config,
+            verbose=verbose,
+            resume=resume,
+        )
+
+        duration = time.time() - start_time
+
+        # Display summary
+        click.echo()
+        click.echo("Migration Summary")
+        click.echo("=================")
+        click.echo(f"Total hours processed: {result.total_hours_processed:,}")
+        click.echo(f"Total batches executed: {result.total_batches_executed:,}")
+        click.echo(f"Elapsed time: {duration:.1f}s")
+        click.echo(f"Status: {result.status.upper()}")
+
+        if result.status == "completed":
+            sys.exit(0)
+        else:
+            if result.error_message:
+                click.echo(f"\nError: {result.error_message}", err=True)
+            sys.exit(1)
+
+    except Exception as e:
+        logger.exception("Migration failed: %s", e)
+        click.echo(f"\nERROR: Migration failed: {e}", err=True)
+        click.echo(
+            f"\nTo resume, run:\n  python -m sf_utils migrate-attachments --resume --config {config}",
+            err=True,
+        )
         sys.exit(1)
 
 
