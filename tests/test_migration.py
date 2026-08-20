@@ -203,7 +203,7 @@ class TestBuildApexCode:
         hour_start = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
         hour_end = datetime(2020, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
 
-        apex_code = build_apex_code(tier, hour_start, hour_end)
+        apex_code = build_apex_code("Progress_Note__c", tier, hour_start, hour_end)
 
         # Verify Apex structure
         assert "BodyLength >= 0" in apex_code
@@ -213,6 +213,7 @@ class TestBuildApexCode:
         assert "Database.executeBatch" in apex_code
         assert "AttachmentToFilesConversionBatch" in apex_code
         assert ", 10)" in apex_code  # batch_size
+        assert "SELECT Id FROM Progress_Note__c" in apex_code
 
     def test_build_apex_code_tier4(self):
         """Should generate Apex code using SingleAttachment class for tier 4."""
@@ -228,7 +229,7 @@ class TestBuildApexCode:
         hour_start = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
         hour_end = datetime(2020, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
 
-        apex_code = build_apex_code(tier, hour_start, hour_end)
+        apex_code = build_apex_code("Progress_Note__c", tier, hour_start, hour_end)
 
         # Tier 4 uses SingleAttachment class
         assert "SingleAttachmentToFilesConversionBatch" in apex_code
@@ -251,9 +252,28 @@ class TestBuildApexCode:
         hour_end = datetime(2020, 1, 1, 1, 0, 0)  # Naive
 
         with pytest.raises(ValueError) as exc_info:
-            build_apex_code(tier, hour_start, hour_end)
+            build_apex_code("Progress_Note__c", tier, hour_start, hour_end)
 
         assert "timezone" in str(exc_info.value).lower()
+
+    def test_build_apex_code_custom_sobject(self):
+        """Should generate Apex code with custom sObject in SOQL."""
+        from sf_utils.migration import build_apex_code, TierConfig
+
+        tier = TierConfig(
+            name="tier1",
+            min_size=0,
+            max_size=1000,
+            batch_size=10,
+            batch_class="AttachmentToFilesConversionBatch"
+        )
+        hour_start = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        hour_end = datetime(2020, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+        apex_code = build_apex_code("Account", tier, hour_start, hour_end)
+
+        assert "SELECT Id FROM Account" in apex_code
+        assert "Progress_Note__c" not in apex_code
 
 
 class TestSaveCursor:
@@ -484,6 +504,7 @@ class TestRunMigration:
 
         with pytest.raises(ValueError) as exc_info:
             run_migration(
+                sobject_type="Progress_Note__c",
                 start_date=naive_date,
                 config_path=tmp_config_file,
                 client=mock_client
@@ -491,7 +512,7 @@ class TestRunMigration:
 
         assert "timezone" in str(exc_info.value).lower()
 
-    @patch('sf_utils.migration._execute_and_poll_batch')
+    @patch('sf_utils.migration.orchestrator._execute_and_poll_batch')
     def test_run_migration_completes_successfully(
         self,
         mock_execute_and_poll,
@@ -507,12 +528,13 @@ class TestRunMigration:
         # Run for 1 hour (start to end within same hour)
         start = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
-        with patch('sf_utils.migration.datetime') as mock_datetime:
+        with patch('sf_utils.migration.orchestrator.datetime') as mock_datetime:
             # Set "now" to just past the start hour
             mock_datetime.now.return_value = datetime(2020, 1, 1, 1, 0, 1, tzinfo=timezone.utc)
             mock_datetime.fromisoformat = datetime.fromisoformat
 
             result = run_migration(
+                sobject_type="Progress_Note__c",
                 start_date=start,
                 config_path=tmp_config_file,
                 client=mock_client,
@@ -523,3 +545,125 @@ class TestRunMigration:
         # The migration processes each hour with 4 tiers
         assert result.total_hours_processed >= 1
         assert result.total_batches_executed >= 4
+
+
+class TestValidateSobjectName:
+    """Tests for sObject name validation to prevent SOQL injection."""
+
+    def test_validate_sobject_name_valid_standard(self):
+        """Should accept valid standard object names."""
+        from sf_utils.migration import validate_sobject_name
+
+        # Should not raise
+        validate_sobject_name("Account")
+        validate_sobject_name("Contact")
+        validate_sobject_name("Case")
+
+    def test_validate_sobject_name_valid_custom(self):
+        """Should accept valid custom object names."""
+        from sf_utils.migration import validate_sobject_name
+
+        validate_sobject_name("Progress_Note__c")
+        validate_sobject_name("My_Custom_Object__c")
+        validate_sobject_name("A")  # Single letter is valid
+
+    def test_validate_sobject_name_soql_injection_attempts(self):
+        """Should reject SOQL injection attempts."""
+        from sf_utils.migration import validate_sobject_name
+
+        malicious_inputs = [
+            "Account WHERE 1=1--",
+            "Contact) OR (Name LIKE '%",
+            "Case'; DELETE FROM Account;--",
+            "../../../etc/passwd",
+            "Account\nWHERE",
+            "Account OR TRUE",
+            "Account/*comment*/",
+        ]
+
+        for malicious in malicious_inputs:
+            with pytest.raises(ValueError) as exc_info:
+                validate_sobject_name(malicious)
+            assert "invalid sobject name" in str(exc_info.value).lower()
+
+    def test_validate_sobject_name_empty_string(self):
+        """Should reject empty string."""
+        from sf_utils.migration import validate_sobject_name
+
+        with pytest.raises(ValueError):
+            validate_sobject_name("")
+
+    def test_validate_sobject_name_starts_with_number(self):
+        """Should reject names starting with numbers."""
+        from sf_utils.migration import validate_sobject_name
+
+        with pytest.raises(ValueError):
+            validate_sobject_name("123Account")
+
+    def test_validate_sobject_name_too_long(self):
+        """Should reject names over 40 characters."""
+        from sf_utils.migration import validate_sobject_name
+
+        long_name = "A" * 41
+        with pytest.raises(ValueError):
+            validate_sobject_name(long_name)
+
+    def test_validate_sobject_name_max_length_accepted(self):
+        """Should accept names at exactly 40 characters."""
+        from sf_utils.migration import validate_sobject_name
+
+        max_name = "A" * 40
+        validate_sobject_name(max_name)  # Should not raise
+
+
+class TestSobjectSpecificCursor:
+    """Tests for sObject-specific cursor file paths."""
+
+    def test_default_cursor_path_for_account(self):
+        """Should generate cursor path based on sObject name, preserving case."""
+        from sf_utils.migration import get_default_cursor_path
+        from pathlib import Path
+
+        path = get_default_cursor_path("Account")
+        assert path == Path(".Account_migration_cursor.json")
+
+    def test_default_cursor_path_for_custom_object(self):
+        """Should handle custom object names correctly, preserving case."""
+        from sf_utils.migration import get_default_cursor_path
+        from pathlib import Path
+
+        path = get_default_cursor_path("Progress_Note__c")
+        assert path == Path(".Progress_Note__c_migration_cursor.json")
+
+
+class TestCustomBatchClasses:
+    """Tests for SF_CUSTOM_BATCH_CLASSES environment variable."""
+
+    def test_custom_batch_class_via_env_var(self, monkeypatch):
+        """Should allow custom batch class names from env var."""
+        # Need to reload the module to pick up env var
+        import importlib
+        import sf_utils.migration.config as config_module
+
+        monkeypatch.setenv("SF_CUSTOM_BATCH_CLASSES", "MyCustomBatch,AnotherBatch")
+
+        # Call the function directly since module already loaded
+        allowed = config_module._get_allowed_batch_classes()
+
+        assert "MyCustomBatch" in allowed
+        assert "AnotherBatch" in allowed
+        assert "AttachmentToFilesConversionBatch" in allowed  # Base classes preserved
+
+    def test_custom_batch_class_invalid_rejected(self, monkeypatch):
+        """Should reject invalid custom batch class names in env var."""
+        import sf_utils.migration.config as config_module
+
+        # Invalid class names should be silently ignored
+        monkeypatch.setenv("SF_CUSTOM_BATCH_CLASSES", "Invalid-Class,123Invalid")
+
+        allowed = config_module._get_allowed_batch_classes()
+
+        assert "Invalid-Class" not in allowed
+        assert "123Invalid" not in allowed
+        # Base classes should still be present
+        assert "AttachmentToFilesConversionBatch" in allowed

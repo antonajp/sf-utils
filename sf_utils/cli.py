@@ -667,6 +667,7 @@ def link_contentdocument_cmd(
 
 
 @cli.command("migrate-attachments")
+@click.argument("sobject_type")
 @click.option(
     "--start-date",
     default="2023-06-01",
@@ -689,6 +690,7 @@ def link_contentdocument_cmd(
     help="Enable debug logging for detailed output",
 )
 def migrate_attachments_cmd(
+    sobject_type: str,
     start_date: str,
     config: Path,
     resume: bool,
@@ -696,29 +698,29 @@ def migrate_attachments_cmd(
 ) -> None:
     """Migrate Salesforce Attachments to ContentDocuments (Files).
 
-    Processes attachments hour-by-hour from Progress_Note__c records,
+    Processes attachments hour-by-hour from any sObject type,
     executing tiered batch jobs based on attachment body size. Supports
     resumption from cursor file on failure.
 
     \b
     Examples:
-        # Run from default start date (2023-06-01)
-        sf-sync migrate-attachments
+        # Migrate attachments from Progress_Note__c records
+        sf-sync migrate-attachments Progress_Note__c
 
         # Run from specific start date
-        sf-sync migrate-attachments --start-date 2024-01-15
+        sf-sync migrate-attachments Progress_Note__c --start-date 2024-01-15
 
-        # Resume from specific hour (for recovery)
-        sf-sync migrate-attachments --start-date 2024-03-10T14
+        # Migrate Account attachments from specific hour (for recovery)
+        sf-sync migrate-attachments Account --start-date 2024-03-10T14
 
         # Custom config file
-        sf-sync migrate-attachments --config ./my-config.properties
+        sf-sync migrate-attachments Progress_Note__c --config ./my-config.properties
 
         # Resume from last cursor position
-        sf-sync migrate-attachments --resume
+        sf-sync migrate-attachments Progress_Note__c --resume
 
         # Verbose mode
-        sf-sync migrate-attachments --verbose
+        sf-sync migrate-attachments Progress_Note__c --verbose
 
     Exit codes:
         0 - Success
@@ -727,7 +729,8 @@ def migrate_attachments_cmd(
     _configure_logging(verbose)
 
     logger.debug(
-        "migrate-attachments invoked: start_date=%s config=%s resume=%s verbose=%s",
+        "migrate-attachments invoked: sobject_type=%s start_date=%s config=%s resume=%s verbose=%s",
+        sobject_type,
         start_date,
         config,
         resume,
@@ -764,7 +767,7 @@ def migrate_attachments_cmd(
 
     try:
         click.echo(
-            f"Starting attachment migration from {parsed_start.strftime('%Y-%m-%d %H:%M')} UTC"
+            f"Starting attachment migration for {sobject_type} from {parsed_start.strftime('%Y-%m-%d %H:%M')} UTC"
         )
         click.echo(f"Config: {config}")
         if resume:
@@ -775,6 +778,7 @@ def migrate_attachments_cmd(
 
         # Run the migration
         result = run_migration(
+            sobject_type=sobject_type,
             start_date=parsed_start,
             config_path=config,
             verbose=verbose,
@@ -803,7 +807,7 @@ def migrate_attachments_cmd(
         logger.exception("Migration failed: %s", e)
         click.echo(f"\nERROR: Migration failed: {e}", err=True)
         click.echo(
-            f"\nTo resume, run:\n  python -m sf_utils migrate-attachments --resume --config {config}",
+            f"\nTo resume, run:\n  sf-sync migrate-attachments {sobject_type} --resume --config {config}",
             err=True,
         )
         sys.exit(1)
