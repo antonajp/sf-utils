@@ -1,15 +1,17 @@
 # Salesforce Attachment Migration Tool
 
-Migrate Salesforce Attachments to ContentDocuments (Files) using tiered batch processing.
+Migrate Salesforce Attachments to ContentDocuments (Files) from **any sObject** using tiered batch processing.
 
 ## Overview
 
 Salesforce is deprecating Classic Attachments in favor of Salesforce Files (ContentDocument/ContentVersion). This CLI tool automates the migration by:
 
+- **Supporting any sObject type** - Migrate attachments from Account, Contact, Case, or any custom object
 - Processing attachments hour-by-hour to manage governor limits
 - Segmenting by file size (BodyLength) with appropriate batch sizes
 - Executing existing Apex batch classes via Anonymous Apex
 - Supporting cursor-based recovery on failure
+- **Concurrent migrations** - Each sObject uses its own cursor file
 
 ## Prerequisites
 
@@ -19,6 +21,8 @@ Salesforce is deprecating Classic Attachments in favor of Salesforce Files (Cont
 2. **Apex Batch Classes** deployed to your org:
    - `AttachmentToFilesConversionBatch` - Standard batch processing
    - `SingleAttachmentToFilesConversionBatch` - Single-record processing for large files
+3. **Custom Field** (for idempotent migrations):
+   - `ContentVersion.Original_Record_Id__c` - Text(18), External ID, Unique
 
 ### Python Requirements
 
@@ -65,6 +69,14 @@ SF_CLIENT_ID=connected-app-consumer-key
 SF_CLIENT_SECRET=connected-app-consumer-secret
 SF_SANDBOX=false
 SF_API_VERSION=v61.0
+```
+
+### Extending Batch Class Allowlist
+
+Add custom batch classes via environment variable:
+
+```bash
+SF_CUSTOM_BATCH_CLASSES=MyCustomBatch,AnotherBatchClass
 ```
 
 ## Configuration
@@ -117,20 +129,21 @@ Adjust batch sizes based on your org's heap limits. Smaller batch sizes are safe
 ### Basic Migration
 
 ```bash
-# Run from default start date (2023-06-01)
-sf-sync migrate-attachments
+# Migrate Progress_Note__c attachments (custom object)
+sf-sync migrate-attachments Progress_Note__c
 
-# Run from a specific start date
-sf-sync migrate-attachments --start-date 2024-01-15
+# Migrate Account attachments
+sf-sync migrate-attachments Account --start-date 2024-01-15
 
-# Use a custom configuration file
-sf-sync migrate-attachments --config ./my-config.properties
+# Migrate Case attachments with custom config
+sf-sync migrate-attachments Case --config ./case-migration.properties
 ```
 
 ### CLI Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
+| Argument/Option | Description | Default |
+|-----------------|-------------|---------|
+| `SOBJECT_TYPE` | **Required.** Salesforce object API name (e.g., Account, Progress_Note__c) | - |
 | `--start-date` | Start date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH) | 2023-06-01 |
 | `--config` | Path to properties configuration file | migration.properties |
 | `--resume` | Resume from last saved cursor position | Off |
@@ -139,42 +152,78 @@ sf-sync migrate-attachments --config ./my-config.properties
 ### Examples
 
 ```bash
-# Start from a specific date
-sf-sync migrate-attachments --start-date 2024-03-01
+# Migrate Progress_Note__c from default start date
+sf-sync migrate-attachments Progress_Note__c
+
+# Migrate Account attachments from specific date
+sf-sync migrate-attachments Account --start-date 2024-03-01
 
 # Start from a specific hour (useful for recovery)
-sf-sync migrate-attachments --start-date 2024-03-10T14
+sf-sync migrate-attachments Contact --start-date 2024-03-10T14
 
 # Resume from cursor after failure
-sf-sync migrate-attachments --resume
+sf-sync migrate-attachments Progress_Note__c --resume
 
 # Verbose output for debugging
-sf-sync migrate-attachments --verbose
+sf-sync migrate-attachments Case --verbose
 
 # Combine options
-sf-sync migrate-attachments --start-date 2024-01-01 --config ./prod-config.properties --verbose
+sf-sync migrate-attachments Account --start-date 2024-01-01 --config ./prod-config.properties --verbose
 ```
+
+## Idempotency
+
+**IMPORTANT**: This tool does NOT prevent duplicate migrations at the Python layer. Idempotency depends entirely on your Apex batch class implementation.
+
+### If your Apex batch class checks `Original_Record_Id__c`
+
+Re-running the migration is safe; duplicates will be skipped.
+
+### If your Apex batch class does NOT check for duplicates
+
+**Risk**: Re-running the migration will create duplicate ContentVersion records for the same Attachments. This results in storage bloat and user confusion.
+
+**Mitigation**:
+- Only run the migration once per date range
+- Manually delete duplicates after accidental re-runs
+- Modify your Apex batch classes to implement idempotency checking
+
+### Required Custom Field (for idempotent migrations)
+
+Create on ContentVersion:
+- **Field Name**: `Original_Record_Id__c`
+- **Type**: Text(18)
+- **External ID**: Yes (recommended for query performance)
+- **Unique**: Yes (recommended)
+
+Your Apex batch class should:
+1. Query existing ContentVersions by `Original_Record_Id__c`
+2. Skip Attachments that have already been converted
 
 ## Error Recovery
 
-The tool automatically saves progress to `.attachment_migration_cursor.json` after each hour completes. If the migration fails:
+The tool automatically saves progress to a sObject-specific cursor file after each hour completes. For example:
+- `Progress_Note__c` → `.progress_note__c_migration_cursor.json`
+- `Account` → `.account_migration_cursor.json`
+
+If the migration fails:
 
 1. **Review the error message** - The tool displays what went wrong
 2. **Resume from cursor** - Run with `--resume` to continue from where it stopped:
 
 ```bash
-sf-sync migrate-attachments --resume
+sf-sync migrate-attachments Progress_Note__c --resume
 ```
 
 3. **Manual recovery** - Start from a specific hour if needed:
 
 ```bash
-sf-sync migrate-attachments --start-date 2024-03-10T14
+sf-sync migrate-attachments Account --start-date 2024-03-10T14
 ```
 
 ### Cursor File Format
 
-The cursor file (`.attachment_migration_cursor.json`) contains:
+The cursor file (e.g., `.progress_note__c_migration_cursor.json`) contains:
 
 ```json
 {
@@ -200,10 +249,24 @@ String query = 'SELECT Id, Name, Body, ParentId, Description, OwnerId,
     CreatedDate, CreatedById, LastModifiedById, LastModifiedDate
     FROM Attachment
     WHERE BodyLength >= {min} AND BodyLength < {max}
-    AND Parent.Id IN (SELECT Id FROM Progress_Note__c
+    AND Parent.Id IN (SELECT Id FROM {SOBJECT_TYPE}
         WHERE CreatedDate >= {hour_start} AND CreatedDate < {hour_end})';
-Id batchId = Database.executeBatch(new AttachmentToFilesConversionBatch(query, 'Progress_Note'), {batch_size});
+Id batchId = Database.executeBatch(new AttachmentToFilesConversionBatch(query, '{SOBJECT_LABEL}'), {batch_size});
 ```
+
+## Platform Considerations
+
+### Person Accounts
+
+When migrating attachments from `Account` in a PersonAccount-enabled org, the query will return attachments from both person accounts and business accounts. Consider filtering by `Account.RecordType.DeveloperName` in your batch class if needed.
+
+### Knowledge Articles
+
+`KnowledgeArticle` and `KnowledgeArticleVersion` have special lifecycle management. Migrations may require handling article versions separately.
+
+### Polymorphic ParentId
+
+The `Attachment.ParentId` field is polymorphic - it can reference any sObject. The subquery pattern correctly filters by parent object type.
 
 ## Exit Codes
 
@@ -214,12 +277,21 @@ Id batchId = Database.executeBatch(new AttachmentToFilesConversionBatch(query, '
 
 ## Troubleshooting
 
+### "Invalid sObject name"
+
+The sObject name must:
+- Start with a letter
+- Contain only alphanumeric characters and underscores
+- Be at most 40 characters
+
+This validation prevents SOQL injection attacks.
+
 ### "Config file not found"
 
 Ensure `migration.properties` exists in the current directory or specify the path:
 
 ```bash
-sf-sync migrate-attachments --config /path/to/migration.properties
+sf-sync migrate-attachments Progress_Note__c --config /path/to/migration.properties
 ```
 
 ### "Authentication failed"
